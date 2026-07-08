@@ -104,7 +104,7 @@ class ImageViewer(QMainWindow):
     Main window for the Micro_GUI image viewer application.
 
     Provides functionality to load binary TIF images (2D and 3D), display them,
-    and perform SMDS (Second-order Moment Density Statistics) calculations.
+    and perform SMDs (Statistical microstructure descriptors) calculations.
 
     Attributes:
         plot_windows: List of open plot windows

@@ -52,8 +52,8 @@ class ImageDisplayWidget(QLabel):
             pos = event.pos()
 
             # Get the pixmap dimensions
-            pixmap_rect = self.pixmap().rect()
-            label_rect = self.rect()
+            pixmap_rect = self.pixmap().rect() # actual image dimensions (e.g., 512x512)
+            label_rect = self.rect() # the label dimensions (e.g., 800x600)
 
             # Calculate the offset (centering)
             x_offset = (label_rect.width() - pixmap_rect.width()) // 2
@@ -64,7 +64,7 @@ class ImageDisplayWidget(QLabel):
             adjusted_y = pos.y() - y_offset
 
             # Check if mouse is within the pixmap bounds
-            if 0 <= adjusted_x < pixmap_rect.width() and 0 <= adjusted_y < pixmap_rect.height():
+            if 0 <= adjusted_x < pixmap_rect.width() and 0 <= adjusted_y < pixmap_rect.height(): # Mouse is over the image?
                 # Calculate scaling factors
                 scale_x = self.image_data.shape[1] / pixmap_rect.width()
                 scale_y = self.image_data.shape[0] / pixmap_rect.height()
