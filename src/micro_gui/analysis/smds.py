@@ -923,7 +923,7 @@ def calculate_polytopes(images, par, outputPn, cpathPn, runtimePn, polytope= 's2
     for filename in glob(outputPn + '/batch*'):
             os.remove(filename) 
 
-##--------------------calculating s2 and f2 in 4D (3D images with time)
+
 
 # def calculate_cluster_fn(images, start_scan = 67):
 #     Nr = min(images.shape[1:]) + 1

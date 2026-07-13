@@ -15,7 +15,6 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PIL import Image
 
 from .widgets import ImageDisplayWidget
-from .plot_window import PlotWindow
 from .rev_plot_window import RevPlotWindow
 from ..analysis.smds import RES, calculate_s2, calculate_s2_3d, REV, RES, calculate_polytopes_python, cal_fn
 from .rev_settings_dialog import REVSettingsDialog
@@ -25,39 +24,6 @@ from .polytope_plot_window import PolytopePlotWindow
 
 
 ## caclulation threads for background processing, so GUI remains responsive
-class CalculationThread(QThread):
-    """
-    Thread for running SMDS calculation in background.
-
-    Attributes:
-        finished: Signal emitted when calculation completes with result
-        error: Signal emitted when an error occurs with error message
-    """
-    finished = Signal(object)
-    error = Signal(str)
-
-    def __init__(self, image_data: np.ndarray, is_3d: bool = False):
-        """
-        Initialize the calculation thread.
-
-        Args:
-            image_data: The image data to process
-            is_3d: Whether this is a 3D image volume
-        """
-        super().__init__()
-        self.image_data = image_data
-        self.is_3d = is_3d
-
-    def run(self):
-        """Run the calculation in a separate thread."""
-        try:
-            if self.is_3d:
-                result = calculate_s2_3d(self.image_data)
-            else:
-                result = calculate_s2(self.image_data)
-            self.finished.emit(result)
-        except Exception as e:
-            self.error.emit(str(e))
 
 class REVCalculationThread(QThread):
     """
@@ -140,7 +106,10 @@ class PolytopeCalculationThread(QThread):
             # are consistent between the two menu items for the same image.
 
             if 's2' in self.selected_polytopes:
-                s2_values = calculate_s2(self.image_data)
+                if self.image_data.ndim == 3:
+                    s2_values = calculate_s2_3d(self.image_data)
+                else:
+                    s2_values = calculate_s2(self.image_data)
                 f2_values = cal_fn(s2_values, n = 2)
                 r_axis =  np.arange(len(s2_values), dtype=np.float64)
 
@@ -191,7 +160,7 @@ class ImageViewer(QMainWindow):
         self.setGeometry(100, 100, 800, 600)
 
         # Store opened windows and image data
-        self.plot_windows: List[PlotWindow] = []
+        self.plot_windows: List[QMainWindow] = []
         self.current_image_data: Optional[np.ndarray] = None
         self.current_file_path: Optional[str] = None
         self.current_slice_index: int = 0
@@ -259,18 +228,18 @@ class ImageViewer(QMainWindow):
         exit_action.setStatusTip("Exit application")
         exit_action.triggered.connect(self.close)
 
-        # Calculate menu
-        calculate_menu = menubar.addMenu("&Calculate")
+        # SMD menu
+        smd_menu = menubar.addMenu("&SMDs")
 
-        smds_action = calculate_menu.addAction("Calculate &SMDS")
-        smds_action.setShortcut("Ctrl+S")
-        smds_action.setStatusTip("Calculate SMDS (S2) from the current image")
-        smds_action.triggered.connect(self.calculate_smds)
+        smds_action = smd_menu.addAction("Calculate &SMDs")
+        # smds_action.setShortcut("Ctrl+S")
+        smds_action.setStatusTip("Calculate SMDs from the current image")
+        smds_action.triggered.connect(self.open_smd_dialog)
 
-        # Polytopes
-        polytope_action = calculate_menu.addAction("Calculate &Polytopes...")
-        polytope_action.setStatusTip("Calculate polytopes functions (S2, P3H, P3V, P4, P6, L) from the current image")
-        polytope_action.triggered.connect(self.calculate_polytopes_dialog)
+        # # Polytopes
+        # polytope_action = calculate_menu.addAction("Calculate &Polytopes...")
+        # polytope_action.setStatusTip("Calculate polytopes functions (S2, P3H, P3V, P4, P6, L) from the current image")
+        # polytope_action.triggered.connect(self.calculate_polytopes_dialog)
 
         # REV menu
         rev_menu = menubar.addMenu("&REV/RES")
@@ -449,69 +418,20 @@ class ImageViewer(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{str(e)}")
                 self.status_bar.showMessage(f"Error: {str(e)}")
 
-    def calculate_smds(self):
-        """Calculate SMDS using the appropriate function and display results."""
-        if self.current_image_data is None:
-            self.status_bar.showMessage("No image loaded. Please open an image first.")
-            QMessageBox.warning(self, "No Image", "Please open an image first.")
-            return
 
-        # Check if 3D
-        is_3d = self.current_image_data.ndim == 3
-
-        # Show progress bar in status bar
-        self.progress_bar.setVisible(True)
-        self.status_bar.showMessage("Calculating SMDS...")
-
-        # Process events to ensure UI updates
-        QApplication.processEvents()
-
-        # Create and start calculation thread
-        self.calc_thread = CalculationThread(self.current_image_data, is_3d)
-        self.calc_thread.finished.connect(self.on_calculation_finished)
-        self.calc_thread.error.connect(self.on_calculation_error)
-        self.calc_thread.start()
-
-    def on_calculation_finished(self, s2_values: np.ndarray):
-        """
-        Handle completion of SMDS calculation.
-
-        Args:
-            s2_values: Calculated S2 values
-        """
-        self.progress_bar.setVisible(False)
-
-        # Create a new window to display the plot
-        plot_window = PlotWindow(s2_values, self)
-        self.plot_windows.append(plot_window)
-        plot_window.show()
-
-        self.status_bar.showMessage("SMDS calculation completed")
-
-    def on_calculation_error(self, error_msg: str):
-        """
-        Handle error during SMDS calculation.
-
-        Args:
-            error_msg: Error message
-        """
-        self.progress_bar.setVisible(False)
-        QMessageBox.critical(self, "Calculation Error", f"Error calculating SMDS:\n{error_msg}")
-        self.status_bar.showMessage(f"Error: {error_msg}")
-
-
-    def calculate_polytopes_dialog(self):
-        """Open the polytope selection dialog (real computation wired up in a later step)."""
+    def open_smd_dialog(self):
+        """Open the SMD selection dialog (real computation wired up in a later step)."""
 
         if self.current_image_data is None:
             QMessageBox.warning(self, "No Image", "Please open an image first.")
             return
         
-        if self.current_image_data.ndim !=2:
-            QMessageBox.warning(self, "Invalid Image", "Polytopes calculation currently only supports 2D images.")
+        if self.current_image_data.ndim not in (2, 3):
+            QMessageBox.warning(self, "Invalid Image", "Image must be 2D or 3D.")
             return
 
-        dialog = PolytopeSettingsDialog(self)
+        is_3d = self.current_image_data.ndim == 3
+        dialog = PolytopeSettingsDialog(is_3d=is_3d, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return  # User cancelled
         

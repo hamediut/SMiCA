@@ -4,7 +4,7 @@ Dialog for selecting which polytope functions to calculate.
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton,
-    QMessageBox, QGroupBox
+    QMessageBox, QGroupBox, QLabel
 )
 
 class PolytopeSettingsDialog(QDialog):
@@ -32,9 +32,10 @@ class PolytopeSettingsDialog(QDialog):
         ('L', 'L (lineal path)'),
     ]
 
-    def __init__(self, parent=None):
+    def __init__(self, is_3d: bool = False, parent=None):
         super().__init__(parent)
 
+        self.is_3d = is_3d
         self.selected_polytopes = None  # will hold the chosen names after OK
 
         self.setWindowTitle("Polytope Calculation Settings")
@@ -50,12 +51,28 @@ class PolytopeSettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        if self.is_3d:
+            info_label = QLabel(
+                "This is a 3D image. Only S2 is currently supported for 3D - the "
+            "other polytope functions (P3H, P3V, P4, P6, L) only work on 2D "
+            "images, so they are disabled below."
+            )
+
+            info_label.setWordWrap(True)
+            layout.addWidget(info_label)
+
         group = QGroupBox("Select functions to calculate")
         group_layout = QVBoxLayout(group)
 
         for internal_name, label in self.POLYTOPE_OPTIONS:
             checkbox = QCheckBox(label)
-            checkbox.setChecked(True)  # default: everything selected
+
+            is_2d_only = internal_name != 's2'  # all except S2 are 2D-only
+            if self.is_3d and is_2d_only:
+                checkbox.setChecked(False)  # uncheck 2D-only options for 3D images
+                checkbox.setEnabled(False)  # disable 2D-only options for 3D images. This is the actual "grey out" mechanism in Qt — a disabled widget renders dimmed and stops receiving clicks/keyboard focus
+            else:
+                checkbox.setChecked(True)  # default: everything selected
             self._checkboxes[internal_name] = checkbox
             group_layout.addWidget(checkbox)
 
