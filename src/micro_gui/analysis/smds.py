@@ -925,36 +925,247 @@ def calculate_polytopes(images, par, outputPn, cpathPn, runtimePn, polytope= 's2
 
 
 
-# def calculate_cluster_fn(images, start_scan = 67):
-#     Nr = min(images.shape[1:]) + 1
-#     Nr_half = Nr//2
-# #     print(f'images shape: {images.shape}')
-# #     print(f'Nr = {Nr}')
-# #     print(f'Nr_half = {Nr_half}')
-#     if images.ndim ==3:
-        
-#         cluster_fn_list = []    
-#         for i in tqdm(range(images.shape[0])):
-            
-#             if np.mean(images[i]) == 0 or i < start_scan: # e.g., if porosity ==0
-#                 cluster_fn_list.append(np.zeros((Nr_half +1,)))
-#             else:
-#                 # cluster image into connected component
-#                 C = GooseEYE.clusters(images[i])
-#                 # # 2-point cluster function
-#                 C2 = GooseEYE.C2((Nr, Nr), C, C)
-#                 cluster_fn_list.append(C2[Nr_half][Nr_half:])
-                
-#         return cluster_fn_list
-    
-#     elif images.ndim == 2:
-#         # cluster image into connected component
-#         C = GooseEYE.clusters(images)
-#         # # 2-point cluster function
-#         C2 = GooseEYE.C2((Nr, Nr), C, C)
-#         cluster_fn = C2[Nr_half][Nr_half:]
+###---------------------two-point cluster function C2 (periodic, no GooseEYE dependency)------------------------
+#
+# A from-scratch reimplementation of GooseEYE's clusters()/C2() for a single square 2D binary image, so users
+# don't need to install GooseEYE (not on PyPI - conda-forge only, a compiled package - exactly the install
+# friction this avoids). Matches GooseEYE's documented definition:
+#     C2(dx) = P{cluster(x) = cluster(x+dx) != 0}
+# i.e. the probability that two points separated by dx belong to the SAME connected cluster of the
+# foreground phase (not just the same phase, which is what S2 measures). Clusters are labelled with
+# 4-connectivity and periodic boundaries, matching GooseEYE.clusters()'s defaults (its "nearest"
+# cross-shaped kernel, periodic=True).
 
-#         return cluster_fn
+@jit(nopython=True)
+def _label_clusters_periodic(binary_image: np.ndarray) -> np.ndarray:
+    """
+    Label 4-connected clusters of the foreground phase (==1) in a 2D binary image, with periodic
+    boundaries (row 0 is adjacent to the last row, column 0 is adjacent to the last column) - matches
+    GooseEYE.clusters(img, periodic=True) with its default nearest-neighbour (cross-shaped) kernel.
+
+    Uses an explicit-stack flood fill rather than recursion, since numba doesn't support recursive
+    functions well and Python's recursion limit would be hit anyway on a 512x512 image. Because each
+    neighbour lookup already wraps around the image edges, a cluster that straddles the boundary is
+    discovered in a single flood fill - no separate "stitching" pass is needed.
+
+    Returns an int32 array the same shape as the input: 0 = background, 1..n = cluster id.
+    """
+    n_rows, n_cols = binary_image.shape
+    labels = np.zeros((n_rows, n_cols), dtype=np.int32)
+    current_label = 0
+
+    # Worst case, every foreground pixel gets pushed onto the stack exactly once (a pixel is only
+    # ever pushed the moment its label goes from 0 to non-zero), so this size is always enough.
+    stack_r = np.empty(n_rows * n_cols, dtype=np.int64)
+    stack_c = np.empty(n_rows * n_cols, dtype=np.int64)
+
+    for start_r in range(n_rows):
+        for start_c in range(n_cols):
+            if binary_image[start_r, start_c] == 1 and labels[start_r, start_c] == 0:
+                current_label += 1
+                stack_r[0] = start_r
+                stack_c[0] = start_c
+                stack_size = 1
+                labels[start_r, start_c] = current_label
+
+                while stack_size > 0:
+                    stack_size -= 1
+                    r = stack_r[stack_size]
+                    c = stack_c[stack_size]
+
+                    r_up = r - 1 if r > 0 else n_rows - 1
+                    r_down = r + 1 if r < n_rows - 1 else 0
+                    c_left = c - 1 if c > 0 else n_cols - 1
+                    c_right = c + 1 if c < n_cols - 1 else 0
+
+                    if binary_image[r_up, c] == 1 and labels[r_up, c] == 0:
+                        labels[r_up, c] = current_label
+                        stack_r[stack_size] = r_up
+                        stack_c[stack_size] = c
+                        stack_size += 1
+                    if binary_image[r_down, c] == 1 and labels[r_down, c] == 0:
+                        labels[r_down, c] = current_label
+                        stack_r[stack_size] = r_down
+                        stack_c[stack_size] = c
+                        stack_size += 1
+                    if binary_image[r, c_left] == 1 and labels[r, c_left] == 0:
+                        labels[r, c_left] = current_label
+                        stack_r[stack_size] = r
+                        stack_c[stack_size] = c_left
+                        stack_size += 1
+                    if binary_image[r, c_right] == 1 and labels[r, c_right] == 0:
+                        labels[r, c_right] = current_label
+                        stack_r[stack_size] = r
+                        stack_c[stack_size] = c_right
+                        stack_size += 1
+
+    return labels
+
+
+@jit(nopython=True)
+def _cluster_line_pair_counts(labels_line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+    """
+    For one periodic 1D line of cluster labels (a row or column), count for each distance
+    r = 0..nt-1 how many pairs (i, i+r) [wrapped periodically] belong to the same non-zero
+    cluster. Building block for C2(r) - same style as _line_pair_counts() (used for the
+    periodic S2 above), just testing cluster-label equality instead of raw phase equality.
+    """
+    counts = np.zeros(nt, dtype=np.float64)
+    for i in range(maxx):
+        li = labels_line[i]
+        if li == 0:  # background pixel - can never be "in the same cluster" as anything
+            continue
+        for r in range(nt):
+            j = i + r
+            if j >= maxx:
+                j -= maxx
+            if labels_line[j] == li:
+                counts[r] += 1.0
+    return counts
+
+
+@jit(nopython=True)
+def compute_c2_cluster(labels: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+    """Two-point cluster function C2(r) = P(same non-zero cluster at distance r), periodic, averaged over rows+columns."""
+    total = np.zeros(nt, dtype=np.float64)
+    for row in range(maxx):
+        total += _cluster_line_pair_counts(labels[row, :], maxx, nt)
+    for col in range(maxx):
+        total += _cluster_line_pair_counts(labels[:, col], maxx, nt)
+    return total / (2.0 * maxx * maxx)
+
+
+def calculate_c2(image_data: np.ndarray) -> np.ndarray:
+    """
+    Calculate the two-point cluster function C2(r) for a 2D binary image, without GooseEYE.
+
+    C2(r) = P(two points a distance r apart belong to the same connected cluster of the
+    foreground phase), periodic boundaries, 4-connectivity - matches
+    GooseEYE.clusters(img, periodic=True) + GooseEYE.C2((Nr, Nr), C, C), radially averaged
+    over rows and columns the same way calculate_s2() averages S2.
+
+    Args:
+        image_data: 2D square binary image array (values should be 0 and 1)
+
+    Returns:
+        1D array of C2 values, r = 0..Nt-1 where Nt = image_size // 2
+    """
+    if image_data.ndim != 2:
+        raise ValueError('calculate_c2 only supports 2D images.')
+    if image_data.shape[0] != image_data.shape[1]:
+        raise ValueError('calculate_c2 requires a square image.')
+
+    ns = image_data.shape[0]
+    nt = ns // 2
+
+    binary = (image_data != 0).astype(np.uint8)
+    labels = _label_clusters_periodic(binary)
+    c2_values = compute_c2_cluster(labels, ns, nt)
+
+    return c2_values
+
+
+@jit(nopython=True)
+def _s2_native_periodic_line(line: np.ndarray, n: int, nt: int) -> np.ndarray:
+    """
+    For one periodic 1D line (a row or column), count for each distance r = 0..nt-1 how many
+    pairs (i, i+r) [wrapped periodically, modulo the line's own length n] are both foreground.
+    Same style as _cluster_line_pair_counts() above, but testing raw phase equality instead of
+    cluster-label equality - i.e. this is S2's building block, using the SAME periodic modulus
+    (n = image size) as calculate_c2()/_label_clusters_periodic(), unlike compute_s2_polytope()
+    below, which uses modulo image_size+1 to match the legacy C++ code.
+    """
+    counts = np.zeros(nt, dtype=np.float64)
+    for i in range(n):
+        if line[i] != 1:
+            continue
+        for r in range(nt):
+            j = i + r
+            if j >= n:
+                j -= n
+            if line[j] == 1:
+                counts[r] += 1.0
+    return counts
+
+
+@jit(nopython=True)
+def _compute_s2_native_periodic(binary_image: np.ndarray, n: int, nt: int) -> np.ndarray:
+    """S2(r), periodic modulo the image's own size (matches calculate_c2()'s convention), averaged over rows+columns."""
+    total = np.zeros(nt, dtype=np.float64)
+    for row in range(n):
+        total += _s2_native_periodic_line(binary_image[row, :], n, nt)
+    for col in range(n):
+        total += _s2_native_periodic_line(binary_image[:, col], n, nt)
+    return total / (2.0 * n * n)
+
+
+def calculate_s2_periodic(image_data: np.ndarray) -> np.ndarray:
+    """
+    Calculate the periodic two-point correlation S2(r) for a 2D binary image, using the same
+    periodic convention (modulo the image's own size, no padding) as calculate_c2(). This is
+    NOT the same curve as calculate_s2() (non-periodic/truncating) or the S2 computed
+    internally by calculate_polytopes_python() (periodic modulo image_size+1, to match the
+    legacy C++ code) - see the module docstring above the polytope section for why those
+    differ. Use this one specifically when you need an S2 curve directly comparable to
+    calculate_c2()'s output, e.g. for scale_c2_by_connectedness().
+
+    Args:
+        image_data: 2D square binary image array (values should be 0 and 1)
+
+    Returns:
+        1D array of S2 values, r = 0..Nt-1 where Nt = image_size // 2
+    """
+    if image_data.ndim != 2:
+        raise ValueError('calculate_s2_periodic only supports 2D images.')
+    if image_data.shape[0] != image_data.shape[1]:
+        raise ValueError('calculate_s2_periodic requires a square image.')
+
+    ns = image_data.shape[0]
+    nt = ns // 2
+
+    binary = (image_data != 0).astype(np.uint8)
+    return _compute_s2_native_periodic(binary, ns, nt)
+
+
+def scale_c2_by_connectedness(c2_values: np.ndarray, s2_values: np.ndarray) -> np.ndarray:
+    """
+    Conditional connectedness ratio g(r) = C2(r) / S2(r): given that two points a distance r
+    apart are already known to be in the same phase, the probability that they are also in
+    the same connected cluster.
+
+    Unlike scale_by_initial_value() (C2(r)/C2(0), which only guarantees f(0)=1), this ratio
+    is bounded in [0, 1] at EVERY r, not just at r=0 - C2(r) <= S2(r) always holds (being in
+    the same cluster is a strictly stronger condition than being in the same phase), so the
+    ratio can never exceed 1. It also automatically equals 1 at r=0 (C2(0) = S2(0) = phi), so
+    it still fits the same "starts at 1" visual convention as the other scaled f(r) curves.
+
+    This is the more physically direct question for understanding connectivity/percolation:
+    a value near 1 at some r means the phase stays well-connected out to that distance; a
+    value dropping toward 0 means phase-similarity increasingly does NOT imply connectivity.
+
+    Reference: this ratio-based "connectedness" interpretation follows the same spirit as the
+    pair-connectedness function used in the continuum-percolation literature, e.g.:
+        S. Torquato, J. D. Beasley, Y. C. Chiew, "Two-point cluster function for continuum
+        percolation", J. Chem. Phys. 88, 6540 (1988). https://doi.org/10.1063/1.454440
+    Note that paper's own pair-connectedness function P2(r) is instead normalized by phi**2
+    (i.e. C2(r) = phi**2 * P2(r)), analogous to how S2(r)/phi**2 gives a radial-distribution-
+    style g(r) - that quantity does NOT start at 1 at r=0 (it starts at 1/phi), so it doesn't
+    match this module's "all scaled curves start at 1" convention the way C2(r)/S2(r) does.
+    Dividing pointwise by S2(r) instead (as done here) is the convention used elsewhere in
+    the microstructure-reconstruction literature to express connectedness as a conditional
+    probability - see e.g. the discussion of C2/S2 in microstructure-reconstruction papers
+    such as https://arxiv.org/abs/2402.15815.
+
+    Args:
+        c2_values: raw C2(r) array from calculate_c2().
+        s2_values: raw S2(r) array from calculate_s2_periodic(), computed on the SAME image -
+            not calculate_s2() (non-periodic) and not the polytope module's internal S2
+            (periodic modulo image_size+1), since those use different boundary conventions.
+
+    Returns:
+        1D array, g(0) = 1.0, bounded in [0, 1] elsewhere.
+    """
+    return c2_values / s2_values
 
 
 ###---------------------polytope functions, pure Python/numba (no C++ executable)------------------------
@@ -1308,6 +1519,24 @@ def scale_polytope_fn(poly_values: np.ndarray) -> np.ndarray:
     phi = poly_values[0]
     phi_n = poly_values[-1] if poly_values[-1] != 0.0 else poly_values[-2]
     return (poly_values - phi_n) / (phi - phi_n)
+
+
+def scale_by_initial_value(values: np.ndarray) -> np.ndarray:
+    """
+    Normalize a curve by its own r=0 value: f(r) = values(r) / values(0).
+
+    Unlike scale_polytope_fn() (which subtracts an assumed long-range plateau - appropriate
+    for functions like S2/P3H/P3V/P4/P6 that provably converge to some power of the volume
+    fraction at large r), this makes no assumption about what the curve converges to. It
+    just rescales so f(0) = 1 and lets the curve decay to wherever it naturally goes.
+
+    Use this for the two-point cluster function C2, whose long-range behaviour is governed
+    by percolation (whether some single cluster actually spans the given distance) rather
+    than by volume fraction alone - there is no theoretical plateau value to subtract the
+    way there is for S2 and the other polytope functions, and subtracting an estimated one
+    (scale_polytope_fn's approach) just introduces noise from a single sampled point.
+    """
+    return values / values[0]
 
 
 def scale_s2(s2_values: np.ndarray, vol_fraction: float) -> np.ndarray:

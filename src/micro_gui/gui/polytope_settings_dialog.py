@@ -25,6 +25,7 @@ class PolytopeSettingsDialog(QDialog):
 
     POLYTOPE_OPTIONS = [
         ('s2', 'S2 (two-point correlation)'),
+        ('c2', 'C2 (two-point cluster function)'),
         ('p3h', 'P3H (triangle, horizontal)'),
         ('p3v', 'P3V (triangle, vertical)'),
         ('p4', 'P4 (square)'),

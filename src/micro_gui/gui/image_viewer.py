@@ -16,7 +16,13 @@ from PIL import Image
 
 from .widgets import ImageDisplayWidget
 from .rev_plot_window import RevPlotWindow
-from ..analysis.smds import RES, calculate_s2, calculate_s2_3d, REV, RES, calculate_polytopes_python, cal_fn
+from ..analysis.smds import (
+    RES, REV,
+     calculate_s2, calculate_s2_periodic , calculate_s2_3d,
+     calculate_polytopes_python, calculate_c2,
+     cal_fn, scale_polytope_fn, scale_by_initial_value, scale_c2_by_connectedness 
+)
+
 from .rev_settings_dialog import REVSettingsDialog
 from .polytope_settings_dialog import PolytopeSettingsDialog
 from .polytope_plot_window import PolytopePlotWindow
@@ -121,8 +127,23 @@ class PolytopeCalculationThread(QThread):
                 raw_curves['s2'] = np.column_stack((r_axis, s2_values))
                 scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
 
+            if 'c2' in self.selected_polytopes:
+                c2_values = calculate_c2(self.image_data)
+
+                # --- earlier scaling approaches, kept for reference (see smds.py docstrings) ---
+                # f2_c2_values = scale_polytope_fn(c2_values)     # subtracts an assumed long-range plateau - wrong for C2, whose plateau is percolation-driven, not phi^n
+                # f2_c2_values = scale_by_initial_value(c2_values)  # simple C2(r)/C2(0) - starts at 1, but unbounded/noisy elsewhere
+
+                # --- current approach: conditional connectedness C2(r)/S2(r) ---
+                s2_periodic_values = calculate_s2_periodic(self.image_data)  # S2 with the SAME periodic convention as C2 (needed as the denominator)
+                f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)  # P(same cluster | same phase) at r - bounded [0,1] at every r, not just r=0
+
+                r_axis = np.arange(len(c2_values), dtype=np.float64)
+                raw_curves['c2'] = np.column_stack((r_axis, c2_values))
+                scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
+            
             # everything else goes through the pure-Python polytope port in one call
-            other_polytopes = [name for name in self.selected_polytopes if name != 's2']
+            other_polytopes = [name for name in self.selected_polytopes if name not in ('s2', 'c2')]
             if other_polytopes:
                 other_raw, other_scaled = calculate_polytopes_python(
                     self.image_data, polytopes=tuple(other_polytopes)
