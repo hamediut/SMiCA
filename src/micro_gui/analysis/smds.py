@@ -1163,9 +1163,198 @@ def scale_c2_by_connectedness(c2_values: np.ndarray, s2_values: np.ndarray) -> n
             (periodic modulo image_size+1), since those use different boundary conventions.
 
     Returns:
-        1D array, g(0) = 1.0, bounded in [0, 1] elsewhere.
+        1D array, g(0) = 1.0, bounded in [0, 1] elsewhere. NaN at any r where S2(r) == 0
+        exactly (no same-phase pairs at that distance to condition on - e.g. a fragmented
+        structure whose largest chord is shorter than r, so the ratio is genuinely
+        undefined there, not just numerically unstable).
     """
-    return c2_values / s2_values
+    with np.errstate(invalid='ignore', divide='ignore'):  # S2(r) == 0 is a real, expected case (see above) - don't warn for it
+        return c2_values / s2_values
+
+
+###---------------------two-point cluster function C2 in 3D (periodic, no GooseEYE dependency)------------------------
+#
+# Direct 3D extension of the 2D C2 section above - same concept (connected-component labelling
+# + periodic pair counting), just with a third axis and 6-connectivity (the 3D analogue of the
+# 2D section's 4-connectivity) instead of 4. _cluster_line_pair_counts() and
+# _s2_native_periodic_line() are reused as-is below - they already operate on a generic 1D line
+# regardless of which image dimensionality it was sliced from.
+#
+# Memory/performance note: for a large cubic volume (e.g. 512^3), the flood-fill stack arrays
+# and the labels array are each sized to the full voxel count, which is a few GB of temporary
+# memory for that size (freed once the function returns) - see calculate_c2_3d()'s docstring.
+
+@jit(nopython=True)
+def _label_clusters_periodic_3d(binary_image: np.ndarray) -> np.ndarray:
+    """
+    Label 6-connected clusters of the foreground phase (==1) in a 3D binary image, with
+    periodic boundaries in all three dimensions - the 3D analogue of
+    _label_clusters_periodic() above (same explicit-stack flood-fill approach, just with a
+    third axis and 6 neighbours - up/down/left/right/front/back - instead of 4).
+
+    Returns an int32 array the same shape as the input: 0 = background, 1..n = cluster id.
+    """
+    n0, n1, n2 = binary_image.shape
+    labels = np.zeros((n0, n1, n2), dtype=np.int32)
+    current_label = 0
+
+    # Worst case, every foreground voxel gets pushed onto the stack exactly once - same
+    # reasoning as the 2D version, just one dimension higher.
+    total_voxels = n0 * n1 * n2
+    stack_0 = np.empty(total_voxels, dtype=np.int32)
+    stack_1 = np.empty(total_voxels, dtype=np.int32)
+    stack_2 = np.empty(total_voxels, dtype=np.int32)
+
+    for start_0 in range(n0):
+        for start_1 in range(n1):
+            for start_2 in range(n2):
+                if binary_image[start_0, start_1, start_2] == 1 and labels[start_0, start_1, start_2] == 0:
+                    current_label += 1
+                    stack_0[0] = start_0
+                    stack_1[0] = start_1
+                    stack_2[0] = start_2
+                    stack_size = 1
+                    labels[start_0, start_1, start_2] = current_label
+
+                    while stack_size > 0:
+                        stack_size -= 1
+                        a = stack_0[stack_size]
+                        b = stack_1[stack_size]
+                        c = stack_2[stack_size]
+
+                        a_minus = a - 1 if a > 0 else n0 - 1
+                        a_plus = a + 1 if a < n0 - 1 else 0
+                        b_minus = b - 1 if b > 0 else n1 - 1
+                        b_plus = b + 1 if b < n1 - 1 else 0
+                        c_minus = c - 1 if c > 0 else n2 - 1
+                        c_plus = c + 1 if c < n2 - 1 else 0
+
+                        if binary_image[a_minus, b, c] == 1 and labels[a_minus, b, c] == 0:
+                            labels[a_minus, b, c] = current_label
+                            stack_0[stack_size] = a_minus
+                            stack_1[stack_size] = b
+                            stack_2[stack_size] = c
+                            stack_size += 1
+                        if binary_image[a_plus, b, c] == 1 and labels[a_plus, b, c] == 0:
+                            labels[a_plus, b, c] = current_label
+                            stack_0[stack_size] = a_plus
+                            stack_1[stack_size] = b
+                            stack_2[stack_size] = c
+                            stack_size += 1
+                        if binary_image[a, b_minus, c] == 1 and labels[a, b_minus, c] == 0:
+                            labels[a, b_minus, c] = current_label
+                            stack_0[stack_size] = a
+                            stack_1[stack_size] = b_minus
+                            stack_2[stack_size] = c
+                            stack_size += 1
+                        if binary_image[a, b_plus, c] == 1 and labels[a, b_plus, c] == 0:
+                            labels[a, b_plus, c] = current_label
+                            stack_0[stack_size] = a
+                            stack_1[stack_size] = b_plus
+                            stack_2[stack_size] = c
+                            stack_size += 1
+                        if binary_image[a, b, c_minus] == 1 and labels[a, b, c_minus] == 0:
+                            labels[a, b, c_minus] = current_label
+                            stack_0[stack_size] = a
+                            stack_1[stack_size] = b
+                            stack_2[stack_size] = c_minus
+                            stack_size += 1
+                        if binary_image[a, b, c_plus] == 1 and labels[a, b, c_plus] == 0:
+                            labels[a, b, c_plus] = current_label
+                            stack_0[stack_size] = a
+                            stack_1[stack_size] = b
+                            stack_2[stack_size] = c_plus
+                            stack_size += 1
+
+    return labels
+
+
+@jit(nopython=True)
+def compute_c2_cluster_3d(labels: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+    """
+    Two-point cluster function C2(r) for a 3D cubic volume, periodic, averaged over all
+    three axes. For every pair of the other two coordinates, extracts a line along each axis
+    in turn and reuses _cluster_line_pair_counts() - the same building block the 2D version
+    uses, since it just operates on whatever 1D line it's handed.
+    """
+    total = np.zeros(nt, dtype=np.float64)
+    for i in range(maxx):
+        for j in range(maxx):
+            total += _cluster_line_pair_counts(labels[i, j, :], maxx, nt)  # line along axis 2
+            total += _cluster_line_pair_counts(labels[i, :, j], maxx, nt)  # line along axis 1
+            total += _cluster_line_pair_counts(labels[:, i, j], maxx, nt)  # line along axis 0
+    return total / (3.0 * maxx * maxx * maxx)
+
+
+def calculate_c2_3d(image_data: np.ndarray) -> np.ndarray:
+    """
+    Calculate the two-point cluster function C2(r) for a 3D binary volume, without GooseEYE.
+    3D analogue of calculate_c2() above - same definition, 6-connectivity instead of 4,
+    periodic in all three dimensions.
+
+    Note on cost: this is noticeably heavier than the 2D version. Both the flood-fill
+    labelling and the O(3 * n^3 * Nt) pair-counting loop scale with the full voxel count, so
+    a 512^3 volume does roughly 500x the work of a 512x512 image - expect a real wait (tens
+    of seconds, not milliseconds) and a few GB of temporary memory for the labelling stacks
+    on a volume that size. Should be run in a background thread in the GUI, same as the other
+    calculations.
+
+    Args:
+        image_data: 3D cubic binary image array (values should be 0 and 1)
+
+    Returns:
+        1D array of C2 values, r = 0..Nt-1 where Nt = image_size // 2
+    """
+    if image_data.ndim != 3:
+        raise ValueError('calculate_c2_3d only supports 3D images.')
+    if not (image_data.shape[0] == image_data.shape[1] == image_data.shape[2]):
+        raise ValueError('calculate_c2_3d requires a cubic image (equal size in all 3 dimensions).')
+
+    ns = image_data.shape[0]
+    nt = ns // 2
+
+    binary = (image_data != 0).astype(np.uint8)
+    labels = _label_clusters_periodic_3d(binary)
+    c2_values = compute_c2_cluster_3d(labels, ns, nt)
+
+    return c2_values
+
+
+@jit(nopython=True)
+def _compute_s2_native_periodic_3d(binary_image: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+    """S2(r) in 3D, periodic modulo the volume's own size (matches calculate_c2_3d()'s convention), averaged over all three axes."""
+    total = np.zeros(nt, dtype=np.float64)
+    for i in range(maxx):
+        for j in range(maxx):
+            total += _s2_native_periodic_line(binary_image[i, j, :], maxx, nt)
+            total += _s2_native_periodic_line(binary_image[i, :, j], maxx, nt)
+            total += _s2_native_periodic_line(binary_image[:, i, j], maxx, nt)
+    return total / (3.0 * maxx * maxx * maxx)
+
+
+def calculate_s2_periodic_3d(image_data: np.ndarray) -> np.ndarray:
+    """
+    Calculate the periodic two-point correlation S2(r) for a 3D binary volume, using the same
+    periodic convention as calculate_c2_3d() (modulo the volume's own size, no padding). 3D
+    analogue of calculate_s2_periodic() above - use this (not calculate_s2_3d(), the existing
+    non-periodic 3D S2), as the denominator for scale_c2_by_connectedness() on 3D data.
+
+    Args:
+        image_data: 3D cubic binary image array (values should be 0 and 1)
+
+    Returns:
+        1D array of S2 values, r = 0..Nt-1 where Nt = image_size // 2
+    """
+    if image_data.ndim != 3:
+        raise ValueError('calculate_s2_periodic_3d only supports 3D images.')
+    if not (image_data.shape[0] == image_data.shape[1] == image_data.shape[2]):
+        raise ValueError('calculate_s2_periodic_3d requires a cubic image (equal size in all 3 dimensions).')
+
+    ns = image_data.shape[0]
+    nt = ns // 2
+
+    binary = (image_data != 0).astype(np.uint8)
+    return _compute_s2_native_periodic_3d(binary, ns, nt)
 
 
 ###---------------------polytope functions, pure Python/numba (no C++ executable)------------------------
