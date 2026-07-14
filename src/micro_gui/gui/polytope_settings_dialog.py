@@ -25,12 +25,15 @@ class PolytopeSettingsDialog(QDialog):
 
     POLYTOPE_OPTIONS = [
         ('s2', 'S2 (two-point correlation)'),
+        ('c2', 'C2 (two-point cluster function)'),
         ('p3h', 'P3H (triangle, horizontal)'),
         ('p3v', 'P3V (triangle, vertical)'),
         ('p4', 'P4 (square)'),
         ('p6', 'P6 (hexagon)'),
         ('L', 'L (lineal path)'),
     ]
+
+    SUPPORT_3D = {'s2', 'c2'}  # only S2 and C2 are supported for 3D images
 
     def __init__(self, is_3d: bool = False, parent=None):
         super().__init__(parent)
@@ -53,7 +56,7 @@ class PolytopeSettingsDialog(QDialog):
 
         if self.is_3d:
             info_label = QLabel(
-                "This is a 3D image. Only S2 is currently supported for 3D - the "
+                "This is a 3D image. Only S2 AND c2 are currently supported for 3D - the "
             "other polytope functions (P3H, P3V, P4, P6, L) only work on 2D "
             "images, so they are disabled below."
             )
@@ -67,7 +70,7 @@ class PolytopeSettingsDialog(QDialog):
         for internal_name, label in self.POLYTOPE_OPTIONS:
             checkbox = QCheckBox(label)
 
-            is_2d_only = internal_name != 's2'  # all except S2 are 2D-only
+            is_2d_only = internal_name not in self.SUPPORT_3D  # all except S2 and C2 are 2D-only
             if self.is_3d and is_2d_only:
                 checkbox.setChecked(False)  # uncheck 2D-only options for 3D images
                 checkbox.setEnabled(False)  # disable 2D-only options for 3D images. This is the actual "grey out" mechanism in Qt — a disabled widget renders dimmed and stops receiving clicks/keyboard focus
