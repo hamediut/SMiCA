@@ -1357,6 +1357,66 @@ def calculate_s2_periodic_3d(image_data: np.ndarray) -> np.ndarray:
     return _compute_s2_native_periodic_3d(binary, ns, nt)
 
 
+###---------------------lineal-path function L in 3D (periodic, native convention)------------------------
+#
+# The lineal-path function L(r) = P(an entire straight line segment of length r lies fully
+# within the foreground phase) is inherently a 1D measurement - it scans straight lines and
+# measures chord lengths - so it generalises to 3D exactly like C2 did: scan lines along a
+# third axis instead of two, and reuse the same per-line building block unchanged.
+# _chord_counts_1d() (defined in the 2D polytope section above, already validated there
+# against the real C++ output) needs no changes at all - it just treats whatever 1D array
+# it's given as one periodic line, regardless of which 3D axis it was sliced from.
+#
+# Like calculate_c2_3d()/calculate_s2_periodic_3d() above (and unlike the 2D lineal-path
+# inside calculate_polytopes_python(), which uses the polytope module's mod image_size+1
+# convention to stay bit-compatible with the legacy C++ Sample_Pn_UU.cpp), this uses the
+# native periodic convention (modulo the volume's own size, no padding) - there is no 3D C++
+# code to match here, and the native convention gives L(0) == porosity exactly.
+
+@jit(nopython=True)
+def compute_L_native_periodic_3d(binary_image: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+    """Lineal-path function L(r) in 3D, periodic modulo the volume's own size, averaged over all three axes."""
+    total = np.zeros(nt, dtype=np.float64)
+    for i in range(maxx):
+        for j in range(maxx):
+            total += _chord_counts_1d_native(binary_image[i, j, :], maxx, nt)  # line along axis 2
+            total += _chord_counts_1d_native(binary_image[i, :, j], maxx, nt)  # line along axis 1
+            total += _chord_counts_1d_native(binary_image[:, i, j], maxx, nt)  # line along axis 0
+    return total / (3.0 * maxx * maxx * maxx)
+
+
+def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
+    """
+    Calculate the lineal-path function L(r) for a 3D binary volume - the probability that an
+    entire straight line segment of length r lies fully within the foreground phase. 3D
+    analogue of the 2D lineal-path calculation inside calculate_polytopes_python(), scanned
+    along three axes (x, y, z) instead of two (rows, columns) - see the module note above for
+    why this uses a different (native) periodic convention than the 2D version.
+
+    Unlike C2, L(r) decays to 0 as r grows for any structure that isn't 100% foreground (an
+    entire line segment fully inside the foreground phase becomes vanishingly likely once r
+    exceeds the largest chord in the material) - it does NOT plateau at a nonzero value the
+    way C2 can for a percolating structure, so scale_by_initial_value() (L(r)/L(0)) is the
+    appropriate scaling here, not scale_c2_by_connectedness() or scale_polytope_fn().
+
+    Args:
+        image_data: 3D cubic binary image array (values should be 0 and 1)
+
+    Returns:
+        1D array of L values, r = 0..Nt-1 where Nt = image_size // 2
+    """
+    if image_data.ndim != 3:
+        raise ValueError('calculate_L_3d only supports 3D images.')
+    if not (image_data.shape[0] == image_data.shape[1] == image_data.shape[2]):
+        raise ValueError('calculate_L_3d requires a cubic image (equal size in all 3 dimensions).')
+
+    ns = image_data.shape[0]
+    nt = ns // 2
+
+    binary = (image_data != 0).astype(np.uint8)
+    return compute_L_native_periodic_3d(binary, ns, nt)
+
+
 ###---------------------polytope functions, pure Python/numba (no C++ executable)------------------------
 #
 # This section is a direct, function-by-function port of cpp_poly/512/Cpp_source/Polytope/Sample_Pn_UU.cpp
@@ -1527,6 +1587,87 @@ def _chord_counts_1d(line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
         elif ctp == 0 and flag_empty != 0:
             # whole line is foreground: one chord that is the full periodic ring
             _add_chord_length(counts, maxx, nt)
+    else:
+        i = 0
+        while i < ctp:
+            length = position[i + 1] - position[i] + 1
+            _add_chord_length(counts, length, nt)
+            i += 2
+
+    return counts
+
+
+@jit(nopython=True)
+def _chord_counts_1d_native(line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+    """
+    Same as _chord_counts_1d() above, with one bug fixed: when the ENTIRE periodic line is
+    foreground (no background pixel anywhere on it), _chord_counts_1d() adds `maxx - r` to
+    each bin `r` - a formula for a *finite* chord of length `maxx` sitting inside a line that
+    has a background boundary somewhere. But a fully-foreground periodic line has no boundary
+    at all: every one of the `maxx` starting positions admits a valid segment of ANY length r
+    (it just keeps going around the ring), so the correct count is a constant `maxx` at every
+    r, not a value that decreases with r.
+
+    This formula (`len - r`) is copied verbatim from the original C++ (Sample_Pn_UU.cpp), so
+    it isn't a bug introduced by the port - it was already there. It practically never gets
+    exercised on real porous-rock images (an entire row/column is essentially never 100%
+    foreground), which is why it was never caught during 2D validation against the compiled
+    C++ output. _chord_counts_1d() is left untouched (still used by the 2D polytope module,
+    compute_L_polytope(), which is deliberately kept bug-compatible with the legacy C++ for
+    validated bit-for-bit parity) - this corrected copy is only used by the native (3D, no
+    legacy C++ to match) lineal-path code below, where there's no reason to keep the bug.
+    """
+    counts = np.zeros(nt, dtype=np.float64)
+
+    ener = np.empty(maxx, dtype=np.int64)
+    flag_empty = 0
+    for i in range(maxx):
+        if line[i] == 0:
+            ener[i] = -1
+        else:
+            en = 0
+            neb1 = i - 1
+            if neb1 < 0:
+                neb1 += maxx
+            if line[neb1] == 1:
+                en += 1
+            neb2 = i + 1
+            if neb2 >= maxx:
+                neb2 -= maxx
+            if line[neb2] == 1:
+                en += 1
+            ener[i] = en
+            flag_empty += 1
+
+    position = np.empty(maxx, dtype=np.int64)
+    ctp = 0
+    for i in range(maxx):
+        if ener[i] == 1:
+            position[ctp] = i
+            ctp += 1
+        elif ener[i] == 0:
+            counts[0] += 1.0  # isolated single-pixel chord: only contributes to r=0
+
+    if line[0] == 1 and line[maxx - 1] == 1:
+        # the foreground run straddles the periodic boundary
+        if ctp > 2:
+            i = 1
+            while i < ctp - 1:
+                length = position[i + 1] - position[i] + 1
+                _add_chord_length(counts, length, nt)
+                i += 2
+            # wrap-around chord: from the last endpoint to the end, plus start to the first endpoint
+            length = (position[0] + 1) + (maxx - position[ctp - 1])
+            _add_chord_length(counts, length, nt)
+        elif ctp == 2:
+            length = (position[0] + 1) + (maxx - position[ctp - 1])
+            _add_chord_length(counts, length, nt)
+        elif ctp == 0 and flag_empty != 0:
+            # whole line is foreground and periodic - no boundary anywhere, so every one of
+            # the `maxx` starting positions admits a chord of any length r (FIX: constant
+            # `maxx`, not `maxx - r` - see this function's docstring).
+            for r in range(nt):
+                counts[r] += maxx
     else:
         i = 0
         while i < ctp:

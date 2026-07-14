@@ -21,7 +21,8 @@ from ..analysis.smds import (
      calculate_s2, calculate_s2_periodic , calculate_s2_3d,
      calculate_polytopes_python, calculate_c2,
      cal_fn, scale_polytope_fn, scale_by_initial_value, scale_c2_by_connectedness,
-     calculate_c2_3d, calculate_s2_periodic_3d
+     calculate_c2_3d, calculate_s2_periodic_3d,
+     calculate_L_3d
 )
 
 from .rev_settings_dialog import REVSettingsDialog
@@ -148,8 +149,19 @@ class PolytopeCalculationThread(QThread):
                 raw_curves['c2'] = np.column_stack((r_axis, c2_values))
                 scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
             
-            # everything else goes through the pure-Python polytope port in one call
-            other_polytopes = [name for name in self.selected_polytopes if name not in ('s2', 'c2')]
+            if 'L' in self.selected_polytopes and self.image_data.ndim == 3:
+                L_values = calculate_L_3d(self.image_data)
+                f_L_values = scale_by_initial_value(L_values)  # L decays to 0 (not a nonzero plateau like C2), so simple L(r)/L(0) is the right scaling here
+                r_axis = np.arange(len(L_values), dtype=np.float64)
+                raw_curves['L'] = np.column_stack((r_axis, L_values))
+                scaled_curves['L'] = np.column_stack((r_axis, f_L_values))  # L is already bounded [0,1], so no further scaling needed
+            
+            # 2D 'L' still goes through calculate_polytopes_python below, same as before - only 3D 'L'
+            # gets the dedicated branch above, since the 2D path is already validated against the C++.
+            other_polytopes = [
+                name for name in self.selected_polytopes
+                if name not in ('s2', 'c2') and not (name == 'L' and self.image_data.ndim == 3)
+            ]
             if other_polytopes:
                 other_raw, other_scaled = calculate_polytopes_python(
                     self.image_data, polytopes=tuple(other_polytopes)

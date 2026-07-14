@@ -33,7 +33,7 @@ class PolytopeSettingsDialog(QDialog):
         ('L', 'L (lineal path)'),
     ]
 
-    SUPPORT_3D = {'s2', 'c2'}  # only S2 and C2 are supported for 3D images
+    SUPPORT_3D = {'s2', 'c2', 'L'}  # only S2, C2, and L are supported for 3D images
 
     def __init__(self, is_3d: bool = False, parent=None):
         super().__init__(parent)
@@ -56,8 +56,8 @@ class PolytopeSettingsDialog(QDialog):
 
         if self.is_3d:
             info_label = QLabel(
-                "This is a 3D image. Only S2 AND c2 are currently supported for 3D - the "
-            "other polytope functions (P3H, P3V, P4, P6, L) only work on 2D "
+                "This is a 3D image. Only S2 AND C2, and L are currently supported for 3D - the "
+            "other polytope functions (P3H, P3V, P4, P6) only work on 2D "
             "images, so they are disabled below."
             )
 
