@@ -28,6 +28,7 @@ from ..analysis.smds import (
 from .rev_settings_dialog import REVSettingsDialog
 from .polytope_settings_dialog import PolytopeSettingsDialog
 from .polytope_plot_window import PolytopePlotWindow
+from .binarize_dialog import BinarizeDialog
 
 
 
@@ -267,6 +268,14 @@ class ImageViewer(QMainWindow):
         exit_action.setStatusTip("Exit application")
         exit_action.triggered.connect(self.close)
 
+        # Process menu
+        process_menu = menubar.addMenu("&Process")
+
+        binarize_action = process_menu.addAction("&Binarize")
+        binarize_action.setStatusTip("Select a pixel value to become the foreground (1); everything else becomes background (0)")
+        binarize_action.triggered.connect(self.open_binarize_dialog)
+
+
         # SMD menu
         smd_menu = menubar.addMenu("&SMDs")
 
@@ -320,19 +329,33 @@ class ImageViewer(QMainWindow):
 
     def numpy_to_qpixmap(self, image_data: np.ndarray) -> QPixmap:
         """
-        Convert numpy array to QPixmap (binary: 1=white, 0=black).
+        Convert numpy array to QPixmap for display.
+        Uses min-max normalization instead of assuming binary 0/1 values, so this works both
+        for binary images (0 -> 0, 1 -> 255, same as before) and multi-label segmentations
+        (e.g. 0,1,2,3 -> 0,85,170,255) without overflowing.
 
         Args:
-            image_data: 2D numpy array with binary values
+            image_data: 2D numpy array (binary or multi-label integer values)
 
         Returns:
             QPixmap for display
         """
-        # For binary images, multiply by 255 to get full white/black contrast
-        if image_data.dtype in [np.uint8, np.uint16]:
-            normalized = (image_data * 255).astype(np.uint8)
+
+        data_min = image_data.min()
+        data_max = image_data.max()
+
+        if data_max > data_min:
+            # Normalize to [0, 255]
+            normalized = ((image_data.astype(np.float64) - data_min) / (data_max - data_min) * 255).astype(np.uint8)
         else:
-            normalized = image_data.astype(np.uint8) * 255
+            # every pixel has the same value (e.g. a blank slice) - avoid a divide-by-zero, show flat mid-grey
+            normalized = np.full_like(image_data, 128, dtype=np.uint8)
+
+        # # For binary images, multiply by 255 to get full white/black contrast
+        # if image_data.dtype in [np.uint8, np.uint16]:
+        #     normalized = (image_data * 255).astype(np.uint8)
+        # else:
+        #     normalized = image_data.astype(np.uint8) * 255
 
         height, width = normalized.shape
         bytes_per_line = width
@@ -412,16 +435,18 @@ class ImageViewer(QMainWindow):
                 else:
                     image_data = image_stack[0]
 
-                # Validate binary image
+                # # Note whether this image needs binarizing before it can be used in calculations -
+                # doesn't block loading, just informs the status message below.
+
                 is_valid, unique_values = self.validate_binary_image(image_data)
-                if not is_valid:
-                    QMessageBox.critical(
-                        self,
-                        "Invalid Image",
-                        f"Error: Image must contain only binary values (0 and 1).\n\n"
-                        f"Found values: {unique_values}"
-                    )
-                    return
+                # if not is_valid:
+                #     QMessageBox.critical(
+                #         self,
+                #         "Invalid Image",
+                #         f"Error: Image must contain only binary values (0 and 1).\n\n"
+                #         f"Found values: {unique_values}"
+                #     )
+                #     return
 
                 # Store current image data
                 self.current_image_data = image_data
@@ -444,7 +469,16 @@ class ImageViewer(QMainWindow):
                 self.display_current_slice()
 
                 # Update status
-                self.status_bar.showMessage(f"Loaded: {file_path}")
+                if is_valid:
+                    self.status_bar.showMessage(f"Loaded: {file_path}")
+                else:
+                    self.status_bar.showMessage("Multi-label image loaded. binarization required.")
+                    QMessageBox.warning(
+                        self,
+                        "Binarization Required",
+                        f"This image has {len(unique_values)} distinct pixel values: {list(unique_values)}.\n\n"
+                        "use Process > Binarize to convert it to select a foreground label before running calculations."
+                    )
                 import os
                 file_name = os.path.basename(file_path)
                 if image_data.ndim == 3:
@@ -456,6 +490,57 @@ class ImageViewer(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{str(e)}")
                 self.status_bar.showMessage(f"Error: {str(e)}")
+
+    def open_binarize_dialog(self):
+        """Open the binarize dialog and apply the chosen foreground value to the current image.
+        (non-modal, so the user can still hover the image to check pixel values)
+        """
+
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
+        
+        unique_values = np.unique(self.current_image_data)
+        if len(unique_values) <= 1:
+            QMessageBox.information(self, "Nothing to Binarize", "This image already has only one pixel value.")
+            return
+        
+        # Keep a reference on self - otherwise Python would garbage-collect the dialog almost
+        # immediately, since show() returns right away instead of blocking like exec() did.
+        self.binarize_dialog = BinarizeDialog(unique_values, parent=self)
+        self.binarize_dialog.accepted.connect(self._apply_binarization)
+        self.binarize_dialog.show()
+
+    def _apply_binarization(self):
+        """Called when the (non-modal) binarize dialog is accepted - applies the chosen foreground value."""
+        foreground_value = self.binarize_dialog.get_foreground_value()
+
+        # Replace the current image with its binarized version: chosen value -> 1, everything else -> 0
+        self.current_image_data = np.where(self.current_image_data == foreground_value, 1, 0).astype(np.uint8)
+
+        # Re-display (same slice index as before, now showing the binarized result)
+        self.display_current_slice()
+
+        self.status_bar.showMessage(f"Binarized: pixel value {foreground_value} set as foreground")
+        QMessageBox.information(
+            self,
+            "Binarization Complete",
+            f"Pixel value {foreground_value} is now the foreground (1); everything else is background (0)."
+        )
+        
+        # foreground_value = dialog.get_foreground_value()
+
+        # # Replace the current image with its binarized version: chosen value -> 1, everything else -> 0
+        # self.current_image_data =  np.where(self.current_image_data==foreground_value, 1, 0).astype(np.uint8)
+        # # Re-display (same slice index as before, now showing the binarized result)
+        # self.display_current_slice()
+
+        # self.status_bar.showMessage(f"Binarized: pixel value {foreground_value} set as foreground")
+        # QMessageBox.information(
+        # self,
+        # "Binarization Complete",
+        # f"Pixel value {foreground_value} is now the foreground (1); everything else is background (0)."
+        # )
 
 
     def open_smd_dialog(self):
