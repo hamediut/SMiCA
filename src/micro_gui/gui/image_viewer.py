@@ -272,6 +272,9 @@ class ImageViewer(QMainWindow):
         import_volume_action.setStatusTip("Import a 3D volume from a folder of 2D Z-slice image files")
         import_volume_action.triggered.connect(self.open_import_volume_dialog)
 
+        import_timeseries_action = file_menu.addAction("Import &Time Series from Folder...")
+        import_timeseries_action.setStatusTip("Import a time series of 2D images from a folder")
+        import_timeseries_action.triggered.connect(self.open_import_time_series_dialog)
 
         exit_action = file_menu.addAction("E&xit")
         exit_action.setShortcut("Ctrl+Q")
@@ -548,6 +551,16 @@ class ImageViewer(QMainWindow):
         self.setWindowTitle(f"SMiCA - [{dims}] - {source_label}")   
 
 
+    def _load_and_stack_2d_files(self, file_paths):
+
+        """Load a list of 2D image files and stack them into a single (N, H, W) array."""
+        slices = [np.array(Image.open(p)) for p in file_paths]
+        shapes = {s.shape for s in slices}
+        if len(shapes) > 1:
+            raise ValueError(f"Not all files have the same shape - found: {shapes}")
+        return np.stack(slices, axis=0)
+
+
     def open_import_volume_dialog(self):
 
         """Import a 3D volume assembled from a folder of 2D Z-slice files."""
@@ -556,24 +569,58 @@ class ImageViewer(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         
-        file_paths =  dialog.get_sorted_file_paths()
+        # file_paths =  dialog.get_sorted_file_paths()
 
         try:
-            slices = [np.array(Image.open(p)) for p in file_paths]
+            image_data = self._load_and_stack_2d_files(dialog.get_sorted_file_paths())
+            # slices = [np.array(Image.open(p)) for p in file_paths]
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load one of the slice images:\n{str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to load slice images:\n{str(e)}")
             return
         
-        shapes = {s.shape for s in slices}
-        if len(shapes) > 1:
-            QMessageBox.critical(self, "Mismatched Slice Sizes", f"Not all slices have the same shape - found: {shapes}")
-            return
+        # shapes = {s.shape for s in slices}
+        # if len(shapes) > 1:
+        #     QMessageBox.critical(self, "Mismatched Slice Sizes", f"Not all slices have the same shape - found: {shapes}")
+        #     return
         
-        image_data = np.stack(slices, axis=0)
+        # image_data = np.stack(slices, axis=0)
         self.current_file_path = dialog.folder_path
         self._finalize_loaded_image(image_data, os.path.basename(dialog.folder_path), data_mode='3d_volume')
 
 
+    def open_import_time_series_dialog(self):
+
+        """Import a 2D time series (3D-per-time-step support coming in a later step) from a folder."""
+
+        dialog = ImportSequenceDialog(ask_file_type= True, parent = self)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+        
+        if dialog.get_is_3d_files():
+            QMessageBox.information(
+                self,"Not Yet Available",
+                "Importing 3D volumes over time isn't wired up yet - coming in a later step. "
+                "For now, please choose files that are '2D slices'."
+            )
+            return
+        try:
+            image_data = self._load_and_stack_2d_files(dialog.get_sorted_file_paths())
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load time-step images:\n{str(e)}")
+            return
+        
+        self.current_file_path = dialog.folder_path
+        self._finalize_loaded_image(image_data, os.path.basename(dialog.folder_path), data_mode='time_series')
+
+
+
+
+
+
+
+    
     
     def open_binarize_dialog(self):
         """Open the binarize dialog and apply the chosen foreground value to the current image.
@@ -636,6 +683,14 @@ class ImageViewer(QMainWindow):
         
         if self.current_image_data.ndim not in (2, 3):
             QMessageBox.warning(self, "Invalid Image", "Image must be 2D or 3D.")
+            return
+        
+        if self.current_image_data.ndim ==3 and self.data_mode == 'time_series':
+            QMessageBox.warning(
+                self, "Not Applicable",
+                "This is a time series, not a spatial 3D volume - the 3D correlation functions "
+                "don't apply across time. Time-series analysis tools are coming in a later step."
+            )
             return
 
         is_3d = self.current_image_data.ndim == 3
@@ -721,6 +776,14 @@ class ImageViewer(QMainWindow):
                 self,
                 "Invalid Image",
                 f"Image must be either 2D or 3D, got {self.current_image_data.ndim}D."
+            )
+            return
+        
+        if self.current_image_data.ndim == 3 and self.data_mode == 'time_series':
+            QMessageBox.warning(
+                self, "Not Applicable",
+                "This is a time series, not a spatial 3D volume - the 3D correlation functions "
+                "don't apply across time. Time-series analysis tools are coming in a later step."
             )
             return
         
