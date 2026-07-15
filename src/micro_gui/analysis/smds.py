@@ -1270,27 +1270,40 @@ def _label_clusters_periodic_3d(binary_image: np.ndarray) -> np.ndarray:
 
 
 @jit(nopython=True)
-def compute_c2_cluster_3d(labels: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+def compute_c2_cluster_3d(labels: np.ndarray, nt: int) -> np.ndarray:
     """
-    Two-point cluster function C2(r) for a 3D cubic volume, periodic, averaged over all
-    three axes. For every pair of the other two coordinates, extracts a line along each axis
-    in turn and reuses _cluster_line_pair_counts() - the same building block the 2D version
-    uses, since it just operates on whatever 1D line it's handed.
+    Two-point cluster function C2(r) for a 3D volume - need NOT be cubic. Each axis is
+    scanned using its OWN length as its periodic wraparound modulus (matches how
+    calculate_s2_3d() already handles non-cubic volumes: use the real extent along every
+    axis, don't crop anything), and every line's histogram is truncated to the same `nt`
+    output bins so the three axes' results stay directly summable.
+
+    Normalisation note: for a periodic domain, (number of lines along an axis) x (length of
+    each such line) always equals the total voxel count, regardless of shape - so all three
+    scan directions contribute exactly n0*n1*n2 pair-evaluations each, and `3 * n0*n1*n2` is
+    simply the non-cubic generalisation of the old `3 * maxx**3`.
     """
+    n0, n1, n2 = labels.shape
     total = np.zeros(nt, dtype=np.float64)
-    for i in range(maxx):
-        for j in range(maxx):
-            total += _cluster_line_pair_counts(labels[i, j, :], maxx, nt)  # line along axis 2
-            total += _cluster_line_pair_counts(labels[i, :, j], maxx, nt)  # line along axis 1
-            total += _cluster_line_pair_counts(labels[:, i, j], maxx, nt)  # line along axis 0
-    return total / (3.0 * maxx * maxx * maxx)
+    for i in range(n1):
+        for j in range(n2):
+            total += _cluster_line_pair_counts(labels[:, i, j], n0, nt)  # line along axis 0
+    for i in range(n0):
+        for j in range(n2):
+            total += _cluster_line_pair_counts(labels[i, :, j], n1, nt)  # line along axis 1
+    for i in range(n0):
+        for j in range(n1):
+            total += _cluster_line_pair_counts(labels[i, j, :], n2, nt)  # line along axis 2
+    return total / (3.0 * n0 * n1 * n2)
 
 
 def calculate_c2_3d(image_data: np.ndarray) -> np.ndarray:
     """
     Calculate the two-point cluster function C2(r) for a 3D binary volume, without GooseEYE.
     3D analogue of calculate_c2() above - same definition, 6-connectivity instead of 4,
-    periodic in all three dimensions.
+    periodic in all three dimensions. Does NOT require a cubic volume - each axis is scanned
+    using its own actual length (see compute_c2_cluster_3d()), the same way calculate_s2_3d()
+    already supports non-cubic volumes, so no data is cropped or discarded.
 
     Note on cost: this is noticeably heavier than the 2D version. Both the flood-fill
     labelling and the O(3 * n^3 * Nt) pair-counting loop scale with the full voxel count, so
@@ -1300,61 +1313,64 @@ def calculate_c2_3d(image_data: np.ndarray) -> np.ndarray:
     calculations.
 
     Args:
-        image_data: 3D cubic binary image array (values should be 0 and 1)
+        image_data: 3D binary image array (values should be 0 and 1)
 
     Returns:
-        1D array of C2 values, r = 0..Nt-1 where Nt = image_size // 2
+        1D array of C2 values, r = 0..Nt-1 where Nt = min(image_data.shape) // 2
     """
     if image_data.ndim != 3:
         raise ValueError('calculate_c2_3d only supports 3D images.')
-    if not (image_data.shape[0] == image_data.shape[1] == image_data.shape[2]):
-        raise ValueError('calculate_c2_3d requires a cubic image (equal size in all 3 dimensions).')
 
-    ns = image_data.shape[0]
-    nt = ns // 2
+    nt = min(image_data.shape) // 2
 
     binary = (image_data != 0).astype(np.uint8)
     labels = _label_clusters_periodic_3d(binary)
-    c2_values = compute_c2_cluster_3d(labels, ns, nt)
+    c2_values = compute_c2_cluster_3d(labels, nt)
 
     return c2_values
 
 
 @jit(nopython=True)
-def _compute_s2_native_periodic_3d(binary_image: np.ndarray, maxx: int, nt: int) -> np.ndarray:
-    """S2(r) in 3D, periodic modulo the volume's own size (matches calculate_c2_3d()'s convention), averaged over all three axes."""
+def _compute_s2_native_periodic_3d(binary_image: np.ndarray, nt: int) -> np.ndarray:
+    """
+    S2(r) in 3D, periodic modulo each axis's OWN length (matches
+    compute_c2_cluster_3d()'s non-cubic-capable convention above), averaged over all three axes.
+    """
+    n0, n1, n2 = binary_image.shape
     total = np.zeros(nt, dtype=np.float64)
-    for i in range(maxx):
-        for j in range(maxx):
-            total += _s2_native_periodic_line(binary_image[i, j, :], maxx, nt)
-            total += _s2_native_periodic_line(binary_image[i, :, j], maxx, nt)
-            total += _s2_native_periodic_line(binary_image[:, i, j], maxx, nt)
-    return total / (3.0 * maxx * maxx * maxx)
+    for i in range(n1):
+        for j in range(n2):
+            total += _s2_native_periodic_line(binary_image[:, i, j], n0, nt)
+    for i in range(n0):
+        for j in range(n2):
+            total += _s2_native_periodic_line(binary_image[i, :, j], n1, nt)
+    for i in range(n0):
+        for j in range(n1):
+            total += _s2_native_periodic_line(binary_image[i, j, :], n2, nt)
+    return total / (3.0 * n0 * n1 * n2)
 
 
 def calculate_s2_periodic_3d(image_data: np.ndarray) -> np.ndarray:
     """
     Calculate the periodic two-point correlation S2(r) for a 3D binary volume, using the same
-    periodic convention as calculate_c2_3d() (modulo the volume's own size, no padding). 3D
-    analogue of calculate_s2_periodic() above - use this (not calculate_s2_3d(), the existing
-    non-periodic 3D S2), as the denominator for scale_c2_by_connectedness() on 3D data.
+    periodic convention as calculate_c2_3d() (modulo each axis's own length, no padding, no
+    cubic requirement). 3D analogue of calculate_s2_periodic() above - use this (not
+    calculate_s2_3d(), the existing non-periodic 3D S2), as the denominator for
+    scale_c2_by_connectedness() on 3D data.
 
     Args:
-        image_data: 3D cubic binary image array (values should be 0 and 1)
+        image_data: 3D binary image array (values should be 0 and 1)
 
     Returns:
-        1D array of S2 values, r = 0..Nt-1 where Nt = image_size // 2
+        1D array of S2 values, r = 0..Nt-1 where Nt = min(image_data.shape) // 2
     """
     if image_data.ndim != 3:
         raise ValueError('calculate_s2_periodic_3d only supports 3D images.')
-    if not (image_data.shape[0] == image_data.shape[1] == image_data.shape[2]):
-        raise ValueError('calculate_s2_periodic_3d requires a cubic image (equal size in all 3 dimensions).')
 
-    ns = image_data.shape[0]
-    nt = ns // 2
+    nt = min(image_data.shape) // 2
 
     binary = (image_data != 0).astype(np.uint8)
-    return _compute_s2_native_periodic_3d(binary, ns, nt)
+    return _compute_s2_native_periodic_3d(binary, nt)
 
 
 ###---------------------lineal-path function L in 3D (periodic, native convention)------------------------
@@ -1374,15 +1390,23 @@ def calculate_s2_periodic_3d(image_data: np.ndarray) -> np.ndarray:
 # code to match here, and the native convention gives L(0) == porosity exactly.
 
 @jit(nopython=True)
-def compute_L_native_periodic_3d(binary_image: np.ndarray, maxx: int, nt: int) -> np.ndarray:
-    """Lineal-path function L(r) in 3D, periodic modulo the volume's own size, averaged over all three axes."""
+def compute_L_native_periodic_3d(binary_image: np.ndarray, nt: int) -> np.ndarray:
+    """
+    Lineal-path function L(r) in 3D, periodic modulo each axis's OWN length (matches
+    compute_c2_cluster_3d()'s non-cubic-capable convention above), averaged over all three axes.
+    """
+    n0, n1, n2 = binary_image.shape
     total = np.zeros(nt, dtype=np.float64)
-    for i in range(maxx):
-        for j in range(maxx):
-            total += _chord_counts_1d_native(binary_image[i, j, :], maxx, nt)  # line along axis 2
-            total += _chord_counts_1d_native(binary_image[i, :, j], maxx, nt)  # line along axis 1
-            total += _chord_counts_1d_native(binary_image[:, i, j], maxx, nt)  # line along axis 0
-    return total / (3.0 * maxx * maxx * maxx)
+    for i in range(n1):
+        for j in range(n2):
+            total += _chord_counts_1d_native(binary_image[:, i, j], n0, nt)  # line along axis 0
+    for i in range(n0):
+        for j in range(n2):
+            total += _chord_counts_1d_native(binary_image[i, :, j], n1, nt)  # line along axis 1
+    for i in range(n0):
+        for j in range(n1):
+            total += _chord_counts_1d_native(binary_image[i, j, :], n2, nt)  # line along axis 2
+    return total / (3.0 * n0 * n1 * n2)
 
 
 def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
@@ -1391,7 +1415,8 @@ def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
     entire straight line segment of length r lies fully within the foreground phase. 3D
     analogue of the 2D lineal-path calculation inside calculate_polytopes_python(), scanned
     along three axes (x, y, z) instead of two (rows, columns) - see the module note above for
-    why this uses a different (native) periodic convention than the 2D version.
+    why this uses a different (native) periodic convention than the 2D version. Does NOT
+    require a cubic volume - see compute_L_native_periodic_3d().
 
     Unlike C2, L(r) decays to 0 as r grows for any structure that isn't 100% foreground (an
     entire line segment fully inside the foreground phase becomes vanishingly likely once r
@@ -1400,21 +1425,18 @@ def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
     appropriate scaling here, not scale_c2_by_connectedness() or scale_polytope_fn().
 
     Args:
-        image_data: 3D cubic binary image array (values should be 0 and 1)
+        image_data: 3D binary image array (values should be 0 and 1)
 
     Returns:
-        1D array of L values, r = 0..Nt-1 where Nt = image_size // 2
+        1D array of L values, r = 0..Nt-1 where Nt = min(image_data.shape) // 2
     """
     if image_data.ndim != 3:
         raise ValueError('calculate_L_3d only supports 3D images.')
-    if not (image_data.shape[0] == image_data.shape[1] == image_data.shape[2]):
-        raise ValueError('calculate_L_3d requires a cubic image (equal size in all 3 dimensions).')
 
-    ns = image_data.shape[0]
-    nt = ns // 2
+    nt = min(image_data.shape) // 2
 
     binary = (image_data != 0).astype(np.uint8)
-    return compute_L_native_periodic_3d(binary, ns, nt)
+    return compute_L_native_periodic_3d(binary, nt)
 
 
 ###---------------------polytope functions, pure Python/numba (no C++ executable)------------------------
