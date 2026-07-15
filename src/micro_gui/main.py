@@ -28,6 +28,7 @@ def main():
     the main image viewer window.
     """
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     app.setApplicationName("Micro_GUI")
     app.setOrganizationName("Microstructure Analysis")
 

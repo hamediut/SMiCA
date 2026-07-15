@@ -2,6 +2,7 @@
 Main image viewer window for the Micro_GUI application.
 """
 
+import os
 import numpy as np
 from typing import Optional, List
 
@@ -29,6 +30,9 @@ from .rev_settings_dialog import REVSettingsDialog
 from .polytope_settings_dialog import PolytopeSettingsDialog
 from .polytope_plot_window import PolytopePlotWindow
 from .binarize_dialog import BinarizeDialog
+
+from .import_sequence_dialog import ImportSequenceDialog
+
 
 
 
@@ -202,6 +206,7 @@ class ImageViewer(QMainWindow):
         # Store opened windows and image data
         self.plot_windows: List[QMainWindow] = []
         self.current_image_data: Optional[np.ndarray] = None
+        self.data_mode: Optional[str] = None
         self.current_file_path: Optional[str] = None
         self.current_slice_index: int = 0
 
@@ -262,6 +267,11 @@ class ImageViewer(QMainWindow):
         open_action.setShortcut("Ctrl+O")
         open_action.setStatusTip("Open a TIF image file")
         open_action.triggered.connect(self.open_image)
+
+        import_volume_action = file_menu.addAction("Import &Volume from Slice Folder")
+        import_volume_action.setStatusTip("Import a 3D volume from a folder of 2D Z-slice image files")
+        import_volume_action.triggered.connect(self.open_import_volume_dialog)
+
 
         exit_action = file_menu.addAction("E&xit")
         exit_action.setShortcut("Ctrl+Q")
@@ -448,49 +458,123 @@ class ImageViewer(QMainWindow):
                 #     )
                 #     return
 
-                # Store current image data
-                self.current_image_data = image_data
+                # # Store current image data
+                # self.current_image_data = image_data
+                # self.current_file_path = file_path
+                # self.current_slice_index = 0
+
+                # # Configure slider for 3D images
+                # if image_data.ndim == 3:
+                #     num_slices = image_data.shape[0]
+                #     self.slice_slider.setMaximum(num_slices - 1)
+                #     self.slice_slider.setValue(0)
+                #     self.slice_slider.setVisible(True)
+                #     self.slice_label.setText(f"Slice: 0 / {num_slices - 1}")
+                #     self.slice_label.setVisible(True)
+                # else:
+                #     self.slice_slider.setVisible(False)
+                #     self.slice_label.setVisible(False)
+
+                # # Display the first slice
+                # self.display_current_slice()
+
+                # # Update status
+                # if is_valid:
+                #     self.status_bar.showMessage(f"Loaded: {file_path}")
+                # else:
+                #     self.status_bar.showMessage("Multi-label image loaded. binarization required.")
+                #     QMessageBox.warning(
+                #         self,
+                #         "Binarization Required",
+                #         f"This image has {len(unique_values)} distinct pixel values: {list(unique_values)}.\n\n"
+                #         "use Process > Binarize to convert it to select a foreground label before running calculations."
+                #     )
+
+                # file_name = os.path.basename(file_path)
+                # if image_data.ndim == 3:
+                #     dims = f"{image_data.shape[1]} x {image_data.shape[2]} x {image_data.shape[0]}"
+                # else:
+                #     dims = f"{image_data.shape[0]} x {image_data.shape[1]}"
+                # self.setWindowTitle(f"SMiCA - [{dims}] - {file_name}")
+
                 self.current_file_path = file_path
-                self.current_slice_index = 0
+                self._finalize_loaded_image(image_data, os.path.basename(file_path), data_mode='3d_volume' if image_data.ndim == 3 else '2d')
 
-                # Configure slider for 3D images
-                if image_data.ndim == 3:
-                    num_slices = image_data.shape[0]
-                    self.slice_slider.setMaximum(num_slices - 1)
-                    self.slice_slider.setValue(0)
-                    self.slice_slider.setVisible(True)
-                    self.slice_label.setText(f"Slice: 0 / {num_slices - 1}")
-                    self.slice_label.setVisible(True)
-                else:
-                    self.slice_slider.setVisible(False)
-                    self.slice_label.setVisible(False)
 
-                # Display the first slice
-                self.display_current_slice()
-
-                # Update status
-                if is_valid:
-                    self.status_bar.showMessage(f"Loaded: {file_path}")
-                else:
-                    self.status_bar.showMessage("Multi-label image loaded. binarization required.")
-                    QMessageBox.warning(
-                        self,
-                        "Binarization Required",
-                        f"This image has {len(unique_values)} distinct pixel values: {list(unique_values)}.\n\n"
-                        "use Process > Binarize to convert it to select a foreground label before running calculations."
-                    )
-                import os
-                file_name = os.path.basename(file_path)
-                if image_data.ndim == 3:
-                    dims = f"{image_data.shape[1]} x {image_data.shape[2]} x {image_data.shape[0]}"
-                else:
-                    dims = f"{image_data.shape[0]} x {image_data.shape[1]}"
-                self.setWindowTitle(f"SMiCA - [{dims}] - {file_name}")
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{str(e)}")
                 self.status_bar.showMessage(f"Error: {str(e)}")
 
+    def _finalize_loaded_image(self, image_data: np.ndarray, source_label: str, data_mode: str):
+
+        """
+        Shared tail-end of loading any image (single file or imported sequence): validates
+        binary-ness, configures the slice slider, displays the first slice, and updates the
+        status bar/title.
+        """
+
+        is_valid, unique_values = self.validate_binary_image(image_data)
+
+        self.current_image_data = image_data
+        self.current_slice_index = 0
+        self.data_mode = data_mode
+
+        if image_data.ndim == 3:
+            num_slices = image_data.shape[0]
+            self.slice_slider.setMaximum(num_slices - 1)
+            self.slice_slider.setValue(0)
+            self.slice_slider.setVisible(True)
+            self.slice_label.setText(f"Slice: 0 / {num_slices - 1}")
+            self.slice_label.setVisible(True)
+            dims = f"{image_data.shape[1]} x {image_data.shape[2]} x {image_data.shape[0]}"
+        else:
+            self.slice_slider.setVisible(False)
+            self.slice_label.setVisible(False)
+            dims = f"{image_data.shape[0]} x {image_data.shape[1]}" 
+
+        self.display_current_slice()
+
+        if is_valid:
+            self.status_bar.showMessage(f"Loaded: {source_label}")
+        else:
+            self.status_bar.showMessage("Multi-label image loaded - binarization required")
+            QMessageBox.warning(
+                self, "Binarization Required",
+                f"This image has {len(unique_values)} distinct pixel values: {list(unique_values)}.\n\n"
+                "Use Process > Binarize to select a foreground label before running calculations."
+            )
+
+        self.setWindowTitle(f"SMiCA - [{dims}] - {source_label}")   
+
+
+    def open_import_volume_dialog(self):
+
+        """Import a 3D volume assembled from a folder of 2D Z-slice files."""
+
+        dialog =  ImportSequenceDialog(ask_file_type = False, parent = self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        
+        file_paths =  dialog.get_sorted_file_paths()
+
+        try:
+            slices = [np.array(Image.open(p)) for p in file_paths]
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load one of the slice images:\n{str(e)}")
+            return
+        
+        shapes = {s.shape for s in slices}
+        if len(shapes) > 1:
+            QMessageBox.critical(self, "Mismatched Slice Sizes", f"Not all slices have the same shape - found: {shapes}")
+            return
+        
+        image_data = np.stack(slices, axis=0)
+        self.current_file_path = dialog.folder_path
+        self._finalize_loaded_image(image_data, os.path.basename(dialog.folder_path), data_mode='3d_volume')
+
+
+    
     def open_binarize_dialog(self):
         """Open the binarize dialog and apply the chosen foreground value to the current image.
         (non-modal, so the user can still hover the image to check pixel values)
