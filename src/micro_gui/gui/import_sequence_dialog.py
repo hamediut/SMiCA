@@ -36,6 +36,7 @@ class ImportSequenceDialog(QDialog):
 
         self.folder_path = None
         self.sorted_file_paths = None  # list of full paths, in final sort order
+        self.sorted_values = None      # the actual numbers extracted from each filename, same order as sorted_file_paths
         self.is_3d_files = False       # only meaningful if ask_file_type=True
 
         self._file_names = []          # filenames only (no path)
@@ -182,10 +183,12 @@ class ImportSequenceDialog(QDialog):
             self.preview_table.setItem(row_idx, 1, QTableWidgetItem(str(value)))
 
         self._sorted_names_preview = [name for name, _ in rows]
+        self._sorted_values_preview = [value for _, value in rows]  # the real extracted numbers, same order
         self.ok_button.setEnabled(True)
 
     def _accept(self):
         self.sorted_file_paths = [os.path.join(self.folder_path, name) for name in self._sorted_names_preview]
+        self.sorted_values = list(self._sorted_values_preview)  # keep the real numbers alongside the paths
         if self.ask_file_type:
             self.is_3d_files = self.radio_3d.isChecked()
         self.accept()
@@ -193,6 +196,10 @@ class ImportSequenceDialog(QDialog):
     def get_sorted_file_paths(self):
         """Return the list of full file paths, in sorted order, or None if cancelled."""
         return self.sorted_file_paths
+
+    def get_sorted_values(self):
+        """Return the actual numbers extracted from each filename, in the same order as get_sorted_file_paths()."""
+        return self.sorted_values
     
     def get_is_3d_files(self):
         """Only meaningful when ask_file_type=True: True if each file is a 3D volume, False if 2D."""

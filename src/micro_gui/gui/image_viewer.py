@@ -23,7 +23,9 @@ from ..analysis.smds import (
      calculate_polytopes_python, calculate_c2,
      cal_fn, scale_polytope_fn, scale_by_initial_value, scale_c2_by_connectedness,
      calculate_c2_3d, calculate_s2_periodic_3d,
-     calculate_L_3d
+     calculate_L_3d,
+     omega_n, delta_omega,
+     compute_2d_polytope_curves
 )
 
 from .rev_settings_dialog import REVSettingsDialog
@@ -33,7 +35,8 @@ from .binarize_dialog import BinarizeDialog
 
 from .import_sequence_dialog import ImportSequenceDialog
 
-
+from .slice_evolution_settings_dialog import SliceEvolutionSettingsDialog
+from .slice_evolution_plot_window import SliceEvolutionPlotWindow
 
 
 ## caclulation threads for background processing, so GUI remains responsive
@@ -182,6 +185,85 @@ class PolytopeCalculationThread(QThread):
 ##-----------------------------------------------------
 
 
+class SliceEvolutionThread(QThread):
+    """
+    Computes 2D polytope functions independently on every slice/time-step of a 3D stack,
+    then derives the Omega/Delta-Omega evolution metrics from those per-slice curves.
+    """
+    # Signal carries everything the plot window needs: which slice/time indices were used,
+    # the raw+scaled curves for each of them, and the two Omega-family metric dicts.
+    finished = Signal(list, list, list, dict, dict)
+    error = Signal(str)
+
+    def __init__(self, image_data: np.ndarray, selected_polytopes: List[str], step: int,
+                 reference_index: int = 0, compute_omega: bool = True,
+                 compute_delta_omega: bool = True, signed_delta_omega: bool = False,
+                 stack_labels=None):
+        super().__init__()
+        self.image_data = image_data
+        self.selected_polytopes = selected_polytopes
+        self.step = step
+        self.reference_index = reference_index
+        self.compute_omega = compute_omega
+        self.compute_delta_omega = compute_delta_omega
+        self.signed_delta_omega = signed_delta_omega
+        # Real step/time numbers from the imported filenames (None if this data has none,
+        # e.g. a native 3D volume) - see run() below for how these get used.
+        self.stack_labels = stack_labels
+
+    def run(self):
+        try:
+            n_slices = self.image_data.shape[0]
+
+            # array_positions: real indices into self.image_data - ALWAYS 0, 1, 2, ...
+            # regardless of what the filenames said, since that's what numpy indexing needs.
+            # e.g. step=1 -> every slice; step=5 -> position 0, 5, 10, 15, ...
+            array_positions = list(range(0, n_slices, self.step))
+
+            # slice_indices: what actually gets plotted/exported later. Real filename-derived
+            # numbers when we have them (self.stack_labels), otherwise just fall back to the
+            # array position itself (e.g. a native 3D volume with no associated filenames).
+            if self.stack_labels is not None:
+                slice_indices = [self.stack_labels[pos] for pos in array_positions]
+            else:
+                slice_indices = array_positions
+
+            # Compute the curves for every slice we're keeping, one call per slice - always
+            # indexed by array POSITION, never by the display numbers above.
+            raw_curves_list = []
+            scaled_curves_list = []
+            for pos in array_positions:
+                raw, scaled = compute_2d_polytope_curves(self.image_data[pos], self.selected_polytopes)
+                raw_curves_list.append(raw)
+                scaled_curves_list.append(scaled)
+
+            # reference_index (from the dialog) is an array POSITION (see
+            # SliceEvolutionSettingsDialog) - find where that position sits within
+            # array_positions to get the LIST position omega_n/delta_omega expect.
+            reference_position = array_positions.index(self.reference_index)
+
+            # For each selected function, pull out just that function's curve from every
+            # slice (curve_series), then hand that list to omega_n()/delta_omega().
+            omega_dict = {}
+            delta_omega_dict = {}
+            for name in self.selected_polytopes:
+                curve_series = [curves[name] for curves in raw_curves_list]
+                # Drop the odd-r placeholder zeros for P3H/P3V before computing Omega, so the
+                # normalization (n_r inside omega_n/delta_omega) reflects the actual number of
+                # meaningful points, not double-counting the always-zero entries.
+
+                if name in ('p3h', 'p3v'):
+                    curve_series = [curve[::2] for curve in curve_series]
+
+                if self.compute_omega:
+                    omega_dict[name] = omega_n(curve_series, reference_index=reference_position)
+                if self.compute_delta_omega:
+                    delta_omega_dict[name] = delta_omega(curve_series, signed=self.signed_delta_omega)
+            # These will be calculated and sent to the plotwindow later
+            self.finished.emit(slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict)
+        except Exception as e:
+            self.error.emit(str(e))
+
 class ImageViewer(QMainWindow):
     """
     Main window for the Micro_GUI image viewer application.
@@ -207,6 +289,9 @@ class ImageViewer(QMainWindow):
         self.plot_windows: List[QMainWindow] = []
         self.current_image_data: Optional[np.ndarray] = None
         self.data_mode: Optional[str] = None
+        # Real step/time numbers per slice, from a folder import's filenames (e.g. [0, 5, 12, 20]).
+        # None for anything without associated filenames (opened tif, native 3D volume).
+        self.stack_labels: Optional[list] = None
         self.current_file_path: Optional[str] = None
         self.current_slice_index: int = 0
 
@@ -509,12 +594,17 @@ class ImageViewer(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{str(e)}")
                 self.status_bar.showMessage(f"Error: {str(e)}")
 
-    def _finalize_loaded_image(self, image_data: np.ndarray, source_label: str, data_mode: str):
+    def _finalize_loaded_image(self, image_data: np.ndarray, source_label: str, data_mode: str, stack_labels=None):
 
         """
         Shared tail-end of loading any image (single file or imported sequence): validates
         binary-ness, configures the slice slider, displays the first slice, and updates the
         status bar/title.
+
+        stack_labels defaults to None, which RESETS it for every load path that doesn't pass
+        one explicitly (open_image, open_import_volume_dialog) - only
+        open_import_time_series_dialog currently passes real values, so a previously-loaded
+        time series's numbers don't linger and get wrongly reused for whatever gets loaded next.
         """
 
         is_valid, unique_values = self.validate_binary_image(image_data)
@@ -522,6 +612,7 @@ class ImageViewer(QMainWindow):
         self.current_image_data = image_data
         self.current_slice_index = 0
         self.data_mode = data_mode
+        self.stack_labels = stack_labels
 
         if image_data.ndim == 3:
             num_slices = image_data.shape[0]
@@ -612,15 +703,14 @@ class ImageViewer(QMainWindow):
             return
         
         self.current_file_path = dialog.folder_path
-        self._finalize_loaded_image(image_data, os.path.basename(dialog.folder_path), data_mode='time_series')
+        # dialog.get_sorted_values() = the real numbers extracted from each filename, in the
+        # same order as the stack we just built - this is what makes the colorbar/x-axis in
+        # the evolution plots show real step/time numbers instead of plain 0,1,2,3...
+        self._finalize_loaded_image(
+            image_data, os.path.basename(dialog.folder_path), data_mode='time_series',
+            stack_labels=dialog.get_sorted_values(),
+        )
 
-
-
-
-
-
-
-    
     
     def open_binarize_dialog(self):
         """Open the binarize dialog and apply the chosen foreground value to the current image.
@@ -659,20 +749,6 @@ class ImageViewer(QMainWindow):
             f"Pixel value {foreground_value} is now the foreground (1); everything else is background (0)."
         )
         
-        # foreground_value = dialog.get_foreground_value()
-
-        # # Replace the current image with its binarized version: chosen value -> 1, everything else -> 0
-        # self.current_image_data =  np.where(self.current_image_data==foreground_value, 1, 0).astype(np.uint8)
-        # # Re-display (same slice index as before, now showing the binarized result)
-        # self.display_current_slice()
-
-        # self.status_bar.showMessage(f"Binarized: pixel value {foreground_value} set as foreground")
-        # QMessageBox.information(
-        # self,
-        # "Binarization Complete",
-        # f"Pixel value {foreground_value} is now the foreground (1); everything else is background (0)."
-        # )
-
 
     def open_smd_dialog(self):
         """Open the SMD selection dialog (real computation wired up in a later step)."""
@@ -683,6 +759,10 @@ class ImageViewer(QMainWindow):
         
         if self.current_image_data.ndim not in (2, 3):
             QMessageBox.warning(self, "Invalid Image", "Image must be 2D or 3D.")
+            return
+        
+        if self.data_mode == 'time_series':
+            self.open_slice_evolution_dialog()
             return
         
         if self.current_image_data.ndim ==3 and self.data_mode == 'time_series':
@@ -755,6 +835,68 @@ class ImageViewer(QMainWindow):
         QMessageBox.critical(self, "Calculation Error", f"Error calculating polytopes:\n{error_msg}")
         self.status_bar.showMessage(f"Error: {error_msg}") 
 
+
+    def open_slice_evolution_dialog(self):
+        """Configure and run per-slice/per-time-step 2D correlation + Omega analysis on the current 3D stack."""
+
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
+        if self.current_image_data.ndim != 3:
+            QMessageBox.warning(self, "Invalid Image", "This requires a 3D volume or an imported time series.")
+            return
+        
+        # Just controls wording in the dialog/plot titles - "Slice" for a real 3D volume,
+        # "Time step" for an imported time series. The underlying calculation is identical.
+
+        axis_label = "time step" if self.data_mode == 'time_series' else "slice"
+        n_slices = self.current_image_data.shape[0]
+
+        dialog = SliceEvolutionSettingsDialog(n_slices, axis_label=axis_label, stack_labels=self.stack_labels, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return  # user cancelled
+        
+         # Show progress bar in status bar, same pattern as the other calculations
+        self.progress_bar.setVisible(True)
+        self.status_bar.showMessage(f"Calculating {axis_label} evolution...")
+        QApplication.processEvents()
+
+         # Stash the axis label on self so on_slice_evolution_finished (below) can use it too -
+        # it only gets the thread's signal arguments, not the dialog itself
+
+        self._evolution_axis_label = axis_label
+
+        self.evolution_thread = SliceEvolutionThread(
+            self.current_image_data, dialog.get_selected_polytopes(), dialog.get_step(),
+            reference_index=dialog.get_reference_index(),
+            compute_omega=dialog.get_compute_omega(),
+            compute_delta_omega=dialog.get_compute_delta_omega(),
+            signed_delta_omega=dialog.get_signed_delta_omega(),
+            stack_labels=self.stack_labels,
+        )
+        self.evolution_thread.finished.connect(self.on_slice_evolution_finished)
+        self.evolution_thread.error.connect(self.on_slice_evolution_error)
+        self.evolution_thread.start()
+
+    def on_slice_evolution_finished(self, slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict):
+
+        """Handle completion of the slice/time evolution calculation - open the results window."""
+        self.progress_bar.setVisible(False)
+
+        window = SliceEvolutionPlotWindow(
+            slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict,
+            axis_label=self._evolution_axis_label, parent=self
+        )
+        self.plot_windows.append(window)
+        window.show()
+
+        self.status_bar.showMessage(f"{self._evolution_axis_label.title()} evolution calculation completed")
+
+    def on_slice_evolution_error(self, error_msg: str):
+        """Handle error during the slice/time evolution calculation."""
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "Calculation Error", f"Error calculating evolution:\n{error_msg}")
+        self.status_bar.showMessage(f"Error: {error_msg}")
 
 
     ## calculate_rev placeholder
