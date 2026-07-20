@@ -48,6 +48,13 @@ class SliceEvolutionPlotWindow(QMainWindow):
         # to whichever tab is currently active, without re-building anything
         self._figures = {}
 
+        # tab index -> key into self._figures/self.raw_curves_list dicts, in the same order
+        # tabs get added below. Looking this up by POSITION (see _current_tab_key) avoids
+        # having to reconstruct the key from the tab's display text, which broke for 'L'
+        # (lineal path): its real key is uppercase 'L', but the tab is labelled "L" too, and
+        # "L".lower() gives 'l' - which doesn't match the actual dict key.
+        self._tab_keys = []
+
         self.tabs = QTabWidget()
 
         # one tab per function, e.g. "S2", "C2", "P4", ...
@@ -57,6 +64,7 @@ class SliceEvolutionPlotWindow(QMainWindow):
             layout.addWidget(self._build_function_tab(name))
             widget.setLayout(layout)
             self.tabs.addTab(widget, name.upper())
+            self._tab_keys.append(name)
 
         # one extra tab for the Omega/Delta-Omega plots, only if at least one was computed
         if self.omega_dict or self.delta_omega_dict:
@@ -65,6 +73,7 @@ class SliceEvolutionPlotWindow(QMainWindow):
             omega_layout.addWidget(self._build_omega_tab())
             omega_widget.setLayout(omega_layout)
             self.tabs.addTab(omega_widget, "Omega")
+            self._tab_keys.append('omega')
 
         self.setCentralWidget(self.tabs)
         self._create_menu()
@@ -154,9 +163,8 @@ class SliceEvolutionPlotWindow(QMainWindow):
         export_action.triggered.connect(self.export_csv)
 
     def _current_tab_key(self):
-        """Map whichever tab is currently showing back to a key in self._figures."""
-        tab_text = self.tabs.tabText(self.tabs.currentIndex())
-        return 'omega' if tab_text == "Omega" else tab_text.lower()
+        """Map whichever tab is currently showing back to a key in self._figures, by position (see self._tab_keys)."""
+        return self._tab_keys[self.tabs.currentIndex()]
 
     def save_plots(self):
         """Save whichever tab's figure is currently active."""
