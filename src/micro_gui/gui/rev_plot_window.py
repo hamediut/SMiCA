@@ -10,6 +10,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
+from .save_dialog_helper import suggested_save_path, remember_save_dir
+
 
 class RevPlotWindow(QMainWindow):
     """
@@ -130,7 +132,7 @@ class RevPlotWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(
             self, # parent (QWidget or QMainWindow)
             f"Save {plot_name} Plot",
-            f"rev_{plot_name.lower()}_plot",# initial folder or suggested filename
+            suggested_save_path(f"rev_{plot_name.lower()}_plot"),  # opens in the last-used save folder
             # selected filters (allowed file types)
             "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;PDF Document (*.pdf);;All Files (*)"
         )
@@ -138,6 +140,7 @@ class RevPlotWindow(QMainWindow):
         if file_path: # If user didn't cancel and selected a file path
             try:
                 current_fig.savefig(file_path, dpi=300, bbox_inches='tight')
+                remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
                 QMessageBox.information(self, "Success", f"{plot_name} plot saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")

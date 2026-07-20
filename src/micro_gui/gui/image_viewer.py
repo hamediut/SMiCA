@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PIL import Image
 
 from .widgets import ImageDisplayWidget
+from .save_dialog_helper import suggested_open_dir, remember_open_dir
 from .rev_plot_window import RevPlotWindow
 from ..analysis.smds import (
     RES, REV,
@@ -509,11 +510,12 @@ class ImageViewer(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open TIF Image",
-            "",
+            suggested_open_dir(),  # opens in the last-used import/open folder
             "TIF Files (*.tif *.tiff);;All Files (*)"
         )
 
         if file_path:
+            remember_open_dir(file_path)  # so the next Open/Import dialog starts in this same folder
             try:
                 # Load TIF image using PIL
                 pil_image = Image.open(file_path)

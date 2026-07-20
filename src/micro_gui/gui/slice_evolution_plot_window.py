@@ -16,6 +16,8 @@ from matplotlib.colors import Normalize
 
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
+from .save_dialog_helper import suggested_save_path, remember_save_dir
+
 class SliceEvolutionPlotWindow(QMainWindow):
 
     """
@@ -171,12 +173,13 @@ class SliceEvolutionPlotWindow(QMainWindow):
         key = self._current_tab_key()
         fig = self._figures[key]
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Plot", f"{self.axis_label}_evolution_{key}",
+            self, "Save Plot", suggested_save_path(f"{self.axis_label}_evolution_{key}"),  # opens in the last-used save folder
             "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;PDF Document (*.pdf);;All Files (*)"
         )
         if file_path:
             try:
                 fig.savefig(file_path, dpi=300, bbox_inches='tight')
+                remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
                 QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")
@@ -185,7 +188,8 @@ class SliceEvolutionPlotWindow(QMainWindow):
         """Export whichever tab is currently active - the Omega tab and the per-function tabs have different columns."""
         key = self._current_tab_key()
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export CSV", f"{self.axis_label}_evolution_{key}", "CSV Files (*.csv);;All Files (*)"
+            self, "Export CSV", suggested_save_path(f"{self.axis_label}_evolution_{key}"),  # opens in the last-used save folder
+            "CSV Files (*.csv);;All Files (*)"
         )
         if not file_path:
             return
@@ -212,6 +216,7 @@ class SliceEvolutionPlotWindow(QMainWindow):
                         scaled_curve = scaled_curves[key]
                         for i, r in enumerate(raw_curve[:, 0]):
                             writer.writerow([idx, int(r), np.round(raw_curve[i, 1], 4), np.round(scaled_curve[i, 1], 4)])
+            remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
             QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV:\n{str(e)}")

@@ -11,6 +11,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
+from .save_dialog_helper import suggested_save_path, remember_save_dir
+
 
 class PolytopePlotWindow(QMainWindow):
     """
@@ -136,13 +138,14 @@ class PolytopePlotWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             f"Save {plot_name} Plot",
-            f"polytope_{plot_name.lower()}",
+            suggested_save_path(f"polytope_{plot_name.lower()}"),  # opens in the last-used save folder
             "PNG Image (*.png);;JPEG Image (*.jpg);;PDF Document (*.pdf);;All Files (*)"
             )
-        
+
         if file_path:
             try:
                 current_fig.savefig(file_path, dpi=500, bbox_inches='tight')
+                remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
                 QMessageBox.information(self, "Success", f"{plot_name} plot saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")
@@ -163,7 +166,7 @@ class PolytopePlotWindow(QMainWindow):
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Export CSV",
-                default_name,
+                suggested_save_path(default_name),  # opens in the last-used save folder
                 "CSV Files (*.csv);;All Files (*)"
             )
 
@@ -183,7 +186,8 @@ class PolytopePlotWindow(QMainWindow):
                         for i, r in enumerate(r_values):
                             row = [int(r)] + [np.round(curves[name][i, 1], decimals=4) for name in names]
                             writer.writerow(row)
-                    
+
+                    remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
                     QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
                 
                 except Exception as e:

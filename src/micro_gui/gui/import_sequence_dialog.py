@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QComboBox, QTableWidget, QTableWidgetItem, QMessageBox, QRadioButton, QGroupBox
 )
 
+from .save_dialog_helper import suggested_open_dir, remember_open_dir
+
 
 class ImportSequenceDialog(QDialog):
 
@@ -111,10 +113,11 @@ class ImportSequenceDialog(QDialog):
     def _browse_folder(self):
 
 
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", suggested_open_dir())
         if not folder:
             return
-        
+        remember_open_dir(folder)  # so the next Open/Import dialog starts in this same folder
+
         files = sorted(f for f in os.listdir(folder) if f.lower().endswith(('tif', 'tiff')))
 
         if not files:
