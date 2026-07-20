@@ -27,11 +27,17 @@ class SliceEvolutionSettingsDialog(QDialog):
         ('L', 'L (lineal path)'),
     ]
 
-    def __init__(self, n_slices: int, axis_label: str = "slice", stack_labels=None, parent=None):
+    SUPPORT_3D = {'s2', 'c2', 'L'}  # only S2, C2, and L are supported for 3D volumes-over-time (same set as PolytopeSettingsDialog)
+
+    def __init__(self, n_slices: int, axis_label: str = "slice", stack_labels=None, is_3d: bool = False, parent=None):
         super().__init__(parent)
 
         self.n_slices = n_slices
         self.axis_label = axis_label
+        # True when each "slice"/time step is itself a 3D volume (imported via "a full 3D
+        # volume" in ImportSequenceDialog) - restricts the checkboxes below to S2/C2/L, same
+        # as PolytopeSettingsDialog does for a single 3D volume.
+        self.is_3d = is_3d
         # Real step/time numbers pulled from the imported filenames (None for a native 3D
         # volume/regular tif, which has no such numbers) - used below only to LABEL the
         # reference dropdown; the actual stored reference is still the array position.
@@ -60,11 +66,27 @@ class SliceEvolutionSettingsDialog(QDialog):
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
 
+        if self.is_3d:
+            volume_info_label = QLabel(
+                "Each " + self.axis_label + " here is a full 3D volume. Only S2, C2, and L are "
+                "currently supported for 3D - the other functions (P3H, P3V, P4, P6) only work "
+                "on 2D images, so they are disabled below."
+            )
+            volume_info_label.setWordWrap(True)
+            layout.addWidget(volume_info_label)
+
         group = QGroupBox("Select functions to calculate")
         group_layout = QVBoxLayout()
         for internal_name, label in self.POLYTOPE_OPTIONS:
             checkbox = QCheckBox(label)
-            checkbox.setChecked(True)
+
+            is_2d_only = internal_name not in self.SUPPORT_3D
+            if self.is_3d and is_2d_only:
+                checkbox.setChecked(False)  # uncheck 2D-only options for volume time series
+                checkbox.setEnabled(False)  # grey out - stops clicks/keyboard focus
+            else:
+                checkbox.setChecked(True)
+
             self._checkboxes[internal_name] = checkbox
             group_layout.addWidget(checkbox)
         group.setLayout(group_layout)

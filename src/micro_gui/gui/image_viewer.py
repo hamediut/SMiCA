@@ -207,11 +207,16 @@ class SliceEvolutionThread(QThread):
                 slice_indices = array_positions
 
             # Compute the curves for every slice we're keeping, one call per slice - always
-            # indexed by array POSITION, never by the display numbers above.
+            # indexed by array POSITION, never by the display numbers above. Each "slice" is
+            # either a 2D image (2D time series) or a 3D volume (4D data, self.image_data.ndim
+            # == 4) - pick the matching curve function once, rather than re-checking per slice.
+            
+            compute_curves = compute_3d_polytope_curves if self.image_data.ndim ==4 else compute_2d_polytope_curves
+            
             raw_curves_list = []
             scaled_curves_list = []
             for pos in array_positions:
-                raw, scaled = compute_2d_polytope_curves(self.image_data[pos], self.selected_polytopes)
+                raw, scaled = compute_curves(self.image_data[pos], self.selected_polytopes)
                 raw_curves_list.append(raw)
                 scaled_curves_list.append(scaled)
 
@@ -769,11 +774,11 @@ class ImageViewer(QMainWindow):
             QMessageBox.warning(self, "No Image", "Please open an image first.")
             return
         
-        if self.current_image_data.ndim not in (2, 3):
-            QMessageBox.warning(self, "Invalid Image", "Image must be 2D or 3D.")
+        if self.current_image_data.ndim not in (2, 3, 4):
+            QMessageBox.warning(self, "Invalid Image", "Image must be 2D, 3D, or 4D.")
             return
         
-        if self.data_mode == 'time_series':
+        if self.data_mode in ('time_series', '4d_time_series'):
             self.open_slice_evolution_dialog()
             return
         
@@ -854,17 +859,19 @@ class ImageViewer(QMainWindow):
         if self.current_image_data is None:
             QMessageBox.warning(self, "No Image", "Please open an image first.")
             return
-        if self.current_image_data.ndim != 3:
-            QMessageBox.warning(self, "Invalid Image", "This requires a 3D volume or an imported time series.")
+        if self.current_image_data.ndim not in (3, 4):
+            QMessageBox.warning(self, "Invalid Image", "This requires a 3D volume or an imported volume time series.")
             return
         
         # Just controls wording in the dialog/plot titles - "Slice" for a real 3D volume,
-        # "Time step" for an imported time series. The underlying calculation is identical.
+        # "Time step" for an imported time series (2D or 3D-per-step). The underlying calculation is identical either way.
 
-        axis_label = "time step" if self.data_mode == 'time_series' else "slice"
+        axis_label = "time step" if self.data_mode in ('time_series', '4d_time_series') else "slice"
         n_slices = self.current_image_data.shape[0]
 
-        dialog = SliceEvolutionSettingsDialog(n_slices, axis_label=axis_label, stack_labels=self.stack_labels, parent=self)
+        is_3d = self.current_image_data.ndim ==4 # Each time step is itself a 3D volume
+
+        dialog = SliceEvolutionSettingsDialog(n_slices, axis_label=axis_label, stack_labels=self.stack_labels, is_3d = is_3d, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return  # user cancelled
         
