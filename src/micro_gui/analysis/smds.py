@@ -1997,6 +1997,40 @@ def compute_2d_polytope_curves(image_2d: np.ndarray, selected_polytopes: List[st
 
     return raw_curves, scaled_curves
 
+def compute_3d_polytope_curves(image_3d: np.ndarray, selected_polytopes: List[str]):
+    """
+    Compute raw/scaled curves for ONE 3D volume and a list of selected function names.
+    Only s2/c2/L are supported in 3D (see PolytopeSettingsDialog.SUPPORT_3D) - any other
+    name is silently ignored, same as compute_2d_polytope_curves does for unknown names
+    it wasn't asked about.
+    """
+    raw_curves = {}
+    scaled_curves = {}
+
+    if 's2' in selected_polytopes:
+        s2_values = calculate_s2_3d(image_3d)
+        f2_values = cal_fn(s2_values, n=2)
+        r_axis = np.arange(len(s2_values), dtype=np.float64)
+        raw_curves['s2'] = np.column_stack((r_axis, s2_values))
+        scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
+
+    if 'c2' in selected_polytopes:
+        c2_values = calculate_c2_3d(image_3d)
+        s2_periodic_values = calculate_s2_periodic_3d(image_3d)  # same periodic convention as C2, needed as the denominator
+        f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)
+        r_axis = np.arange(len(c2_values), dtype=np.float64)
+        raw_curves['c2'] = np.column_stack((r_axis, c2_values))
+        scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
+
+    if 'L' in selected_polytopes:
+        L_values = calculate_L_3d(image_3d)
+        f_L_values = scale_by_initial_value(L_values)  # L decays to 0, so L(r)/L(0) is the right scaling
+        r_axis = np.arange(len(L_values), dtype=np.float64)
+        raw_curves['L'] = np.column_stack((r_axis, L_values))
+        scaled_curves['L'] = np.column_stack((r_axis, f_L_values))
+
+    return raw_curves, scaled_curves
+
 
 ##-------------------------------------------Omega metric to calculate the evolution of SMDs--------------------------
 # def omega_n(polytope:List[np.ndarray],
