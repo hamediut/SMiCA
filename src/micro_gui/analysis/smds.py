@@ -1962,3 +1962,213 @@ def calculate_polytopes_python(image: np.ndarray,
         scaled[name] = np.column_stack((r_axis, values_scaled))
 
     return raw, scaled
+
+
+def compute_2d_polytope_curves(image_2d: np.ndarray, selected_polytopes: List[str]):
+    """
+    Compute raw/scaled curves for ONE 2D image and a list of selected function names.
+    Shared by PolytopeCalculationThread (single-image case) and SliceEvolutionThread
+    (looping over many slices/time steps), so the S2/C2/etc. branching logic isn't
+    duplicated between the two.
+    """
+    raw_curves = {}
+    scaled_curves = {}
+
+    if 's2' in selected_polytopes:
+        s2_values = calculate_s2(image_2d)
+        f2_values = cal_fn(s2_values, n=2)
+        r_axis = np.arange(len(s2_values), dtype=np.float64)
+        raw_curves['s2'] = np.column_stack((r_axis, s2_values))
+        scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
+
+    if 'c2' in selected_polytopes:
+        c2_values = calculate_c2(image_2d)
+        s2_periodic_values = calculate_s2_periodic(image_2d)
+        f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)
+        r_axis = np.arange(len(c2_values), dtype=np.float64)
+        raw_curves['c2'] = np.column_stack((r_axis, c2_values))
+        scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
+
+    other_polytopes = [name for name in selected_polytopes if name not in ('s2', 'c2')]
+    if other_polytopes:
+        other_raw, other_scaled = calculate_polytopes_python(image_2d, polytopes=tuple(other_polytopes))
+        raw_curves.update(other_raw)
+        scaled_curves.update(other_scaled)
+
+    return raw_curves, scaled_curves
+
+
+##-------------------------------------------Omega metric to calculate the evolution of SMDs--------------------------
+# def omega_n(polytope:List[np.ndarray],
+#             delta_time:tuple =None):
+#     """delta_time: tuple showing the first and last time step. e.g., (0,10)--> t0, t10"""
+#     polytope =np.nan_to_num(polytope) # Convert Nan values to 0
+    
+#     if not delta_time:
+#         delta_time = list(range(0, len(polytope)))
+#     else:
+#         delta_time = list(range(delta_time[0], delta_time[1]))
+    
+#     # N(L)--> number of different sized polytopes which will be number of r??
+#     # for example if image size = 512, we have 256 rs--> N(L) = 256
+#     # the function for calculating s2 is different than higher-order functions.
+#      # s2 input is a list of length= number of timesteps
+#     # each s2 in the list is a 1D vector of s2 values with length of r (Nl)
+#     omega_list = []
+#     if polytope[-1].ndim ==1:
+#         N_L= 1/ len(polytope[-1])
+#         for time in delta_time:
+#             if type(polytope[time]) == int and polytope[time] == 0:
+#                 omega = 0
+#             else:
+#                 omega =np.linalg.norm(polytope[time]-polytope[0], ord =1) # L1_norm
+#             omega_t = N_L* omega
+#             omega_list.append(omega_t)
+        
+#     elif polytope[0].ndim == 2:
+#         N_L = 1/len(polytope[0][:, 0])
+        
+#         for time in delta_time:
+#             omega =np.linalg.norm(polytope[time][:, 1]-polytope[0][:, 1], ord =1) # L1_norm
+#             omega_t = N_L* omega
+#             omega_list.append(omega_t)
+
+#     return omega_list
+
+def omega_n(curve_series: List[np.ndarray],
+            reference_index: int = 0,
+            time_range: Optional[Tuple[int, int]] = None) -> np.ndarray:
+    """
+    Omega(t): the L1 distance between the curve at each time/slice index and a single
+    reference curve (curve_series[reference_index]), normalized by the number of r-values
+    so Omega is comparable across different image sizes / Nt values.
+
+        Omega(t) = (1/Nr) * sum_r |curve(t)[r] - curve(reference)[r]|
+
+    Args:
+        curve_series: list of per-slice/per-time curves - either all 1D arrays of raw
+            values (e.g. calculate_s2() output) or all 2D [r, value] arrays (e.g. from
+            calculate_polytopes_python()/compute_2d_polytope_curves()) - must all be the
+            same shape. Entries that aren't arrays (e.g. a bare 0 for a skipped slice) are
+            treated as all-zero curves.
+        reference_index: which entry of curve_series every other entry is compared against.
+        time_range: (start, end), INCLUSIVE of both ends - e.g. (0, 10) computes Omega for
+            indices 0..10. Defaults to the full curve_series.
+
+    Returns:
+        1D numpy array of Omega values, one per index in the requested range.
+    """
+    if not curve_series:
+        raise ValueError('curve_series must not be empty.')
+
+    reference_shape = np.asarray(curve_series[reference_index]).shape
+    cleaned = [c if isinstance(c, np.ndarray) else np.zeros(reference_shape) for c in curve_series]
+    curves = np.nan_to_num(np.stack(cleaned))  # shape (T, Nr) or (T, Nr, 2)
+
+    if not (0 <= reference_index < len(curves)):
+        raise ValueError(f'reference_index {reference_index} is out of range for {len(curves)} curves.')
+
+    if time_range is None:
+        indices = range(len(curves))
+    else:
+        start, end = time_range
+        indices = range(start, end + 1)
+
+    values = curves[..., 1] if curves.ndim == 3 else curves  # drop the r column if present
+    n_r = values.shape[1]
+    reference = values[reference_index]
+
+    return np.array([np.linalg.norm(values[t] - reference, ord=1) / n_r for t in indices])
+
+# ## this is delta omega without absolute difference so it shows the negative change...
+# def delta_omega(polytope, delta_time =None):
+#     """delta_time: tuple showing the first and last time step. e.g., (0,10)--> t0, t10"""
+#     polytope =np.nan_to_num(polytope) # Convert Nan values to 0
+    
+#     if not delta_time:
+#         delta_time = list(range(0, len(polytope)))
+#     else:
+#         delta_time = list(range(delta_time[0], delta_time[1]))
+    
+#     # N(L)--> number of different sized polytopes which will be number of r??
+#     # for example if image size = 512, we have 256 rs--> N(L) = 256
+#     # the function for calculating s2 is different than higher-order functions.
+#      # s2 input is a list of length= number of timesteps
+#     # each s2 in the list is a 1D vector of s2 values with length of r (Nl)
+#     omega_list = []
+#     if polytope[-1].ndim ==1:
+#         N_L= 1/ len(polytope[-1])
+#         for idx, time in enumerate(delta_time):
+                       
+#             if type(polytope[time]) != np.ndarray:
+#                 omega = 0
+#             else:
+# #                 omega = np.linalg.norm(polytope[time]-polytope[time -1], ord =1) #L1 norm absolute distance
+#                 omega = np.sum(polytope[time]-polytope[time -1]) # sum of distance
+# #             if idx ==0:
+# #                 omega =np.linalg.norm(polytope[time]-polytope[0], ord =1) # L1_norm
+# #             else:
+# #                 omega =np.linalg.norm(polytope[time]-polytope[time - 1], ord =1) # L1_norm
+                
+#             omega_t = N_L* omega
+#             omega_list.append(omega_t)
+        
+#     elif polytope[0].ndim == 2:
+#         N_L = 1/len(polytope[0][:, 0])
+        
+#         for idx, time in enumerate(delta_time):
+# #             omega=0 if idx ==0 else np.linalg.norm(polytope[time][:, 1]-polytope[time -1][:, 1], ord =1)
+#             omega=0 if idx ==0 else np.sum(polytope[time][:, 1]-polytope[time -1][:, 1]) # sum of distance
+# #             omega =np.linalg.norm(polytope[time][:, 1]-polytope[0][:, 1], ord =1) # L1_norm
+#             omega_t = N_L* omega
+#             omega_list.append(omega_t)
+
+#     return omega_list
+
+def delta_omega(curve_series: List[np.ndarray],
+                 signed: bool = False,
+                 time_range: Optional[Tuple[int, int]] = None) -> np.ndarray:
+    """
+    Delta-Omega(t): distance between each curve and the PREVIOUS one in the series (not a
+    fixed reference), so it tracks step-to-step change rather than total drift from one
+    point. Index 0 has no previous curve, so it's always 0.
+
+    Args:
+        curve_series: same convention as omega_n().
+        signed: if False (default), uses the L1 norm - always >= 0, measuring the MAGNITUDE
+            of change regardless of direction. If True, uses the plain sum of (signed)
+            differences instead - can be positive or negative (shows net/directional drift),
+            but a curve that increases in some places and decreases elsewhere by the same
+            amount would misleadingly report ~0 even though it changed a lot. Use True only
+            when you specifically want net drift, not overall magnitude of change.
+        time_range: (start, end), INCLUSIVE of both ends, as in omega_n().
+
+    Returns:
+        1D numpy array of Delta-Omega values.
+    """
+    if not curve_series:
+        raise ValueError('curve_series must not be empty.')
+
+    reference_shape = np.asarray(curve_series[0]).shape
+    cleaned = [c if isinstance(c, np.ndarray) else np.zeros(reference_shape) for c in curve_series]
+    curves = np.nan_to_num(np.stack(cleaned))
+
+    if time_range is None:
+        indices = range(len(curves))
+    else:
+        start, end = time_range
+        indices = range(start, end + 1)
+
+    values = curves[..., 1] if curves.ndim == 3 else curves
+    n_r = values.shape[1]
+
+    omega_values = []
+    for t in indices:
+        if t == 0:
+            omega_values.append(0.0)  # no previous curve exists at all
+            continue
+        diff = values[t] - values[t - 1]
+        omega = np.sum(diff) if signed else np.linalg.norm(diff, ord=1)
+        omega_values.append(omega / n_r)
+
+    return np.array(omega_values)
