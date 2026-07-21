@@ -26,7 +26,7 @@ from ..analysis.smds import (
      calculate_c2_3d, calculate_s2_periodic_3d,
      calculate_L_3d,
      omega_n, delta_omega,
-     compute_2d_polytope_curves
+     compute_2d_polytope_curves, compute_3d_polytope_curves
 )
 
 from .rev_settings_dialog import REVSettingsDialog
@@ -116,68 +116,45 @@ class PolytopeCalculationThread(QThread):
         """Run the selected polytope calculations in a separate thread."""
         
         try:
-            raw_curves = {}
-            scaled_curves = {}
 
-            # S2 uses the same (non-periodic) code as "Calculate SMDS", so results
-            # are consistent between the two menu items for the same image.
+            if self.image_data.ndim ==3:
+                # 3D volume: s2/c2/L, computed by the same helper the 4D slice/time
+                # evolution thread will use per time step (see compute_3d_polytope_curves
+                # in smds.py) - one shared place for the 3D branching logic instead of two.
+                raw_curves, scaled_curves = compute_3d_polytope_curves(self.image_data, self.selected_polytopes)
 
-            if 's2' in self.selected_polytopes:
-                if self.image_data.ndim == 3:
-                    s2_values = calculate_s2_3d(self.image_data)
-                else:
+            else:
+                raw_curves = {}
+                scaled_curves = {}
+
+                # S2 uses the same (non-periodic) code as "Calculate SMDS", so results
+                # are consistent between the two menu items for the same image.
+
+                if 's2' in self.selected_polytopes:
                     s2_values = calculate_s2(self.image_data)
-                f2_values = cal_fn(s2_values, n = 2)
-                r_axis =  np.arange(len(s2_values), dtype=np.float64)
+                    f2_values = cal_fn(s2_values, n = 2)
+                    r_axis =  np.arange(len(s2_values), dtype=np.float64)
+                    raw_curves['s2'] = np.column_stack((r_axis, s2_values))
+                    scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
 
-                # Wrapped as a 2-column [r, value] array, same shape convention as
-                    # calculate_polytopes_python's output, so every curve downstream
-                    # (plotting, CSV export) can be handled identically regardless of
-                    # which function computed it.
-
-                raw_curves['s2'] = np.column_stack((r_axis, s2_values))
-                scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
-
-            if 'c2' in self.selected_polytopes:
-
-                if self.image_data.ndim == 3:
-                    c2_values = calculate_c2_3d(self.image_data)
-                    s2_periodic_values = calculate_s2_periodic_3d(self.image_data)  # S2 with the SAME periodic convention as C2 (needed as the denominator)
-                else:
+                if 'c2' in self.selected_polytopes:
                     c2_values = calculate_c2(self.image_data)
                     s2_periodic_values = calculate_s2_periodic(self.image_data)  # S2 with the SAME periodic convention as C2 (needed as the denominator)
-
-                # --- earlier scaling approaches, kept for reference (see smds.py docstrings) ---
-                # f2_c2_values = scale_polytope_fn(c2_values)     # subtracts an assumed long-range plateau - wrong for C2, whose plateau is percolation-driven, not phi^n
-                # f2_c2_values = scale_by_initial_value(c2_values)  # simple C2(r)/C2(0) - starts at 1, but unbounded/noisy elsewhere
-
-                # --- current approach: conditional connectedness C2(r)/S2(r) ---
-                f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)  # P(same cluster | same phase) at r - bounded [0,1] at every r, not just r=0
-
-                r_axis = np.arange(len(c2_values), dtype=np.float64)
-                raw_curves['c2'] = np.column_stack((r_axis, c2_values))
-                scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
+                    # --- current approach: conditional connectedness C2(r)/S2(r) ---
+                    f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)  # P(same cluster | same phase) at r - bounded [0,1] at every r, not just r=0
+                    r_axis = np.arange(len(c2_values), dtype=np.float64)
+                    raw_curves['c2'] = np.column_stack((r_axis, c2_values))
+                    scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
             
-            if 'L' in self.selected_polytopes and self.image_data.ndim == 3:
-                L_values = calculate_L_3d(self.image_data)
-                f_L_values = scale_by_initial_value(L_values)  # L decays to 0 (not a nonzero plateau like C2), so simple L(r)/L(0) is the right scaling here
-                r_axis = np.arange(len(L_values), dtype=np.float64)
-                raw_curves['L'] = np.column_stack((r_axis, L_values))
-                scaled_curves['L'] = np.column_stack((r_axis, f_L_values))  # L is already bounded [0,1], so no further scaling needed
-            
-            # 2D 'L' still goes through calculate_polytopes_python below, same as before - only 3D 'L'
-            # gets the dedicated branch above, since the 2D path is already validated against the C++.
-            other_polytopes = [
-                name for name in self.selected_polytopes
-                if name not in ('s2', 'c2') and not (name == 'L' and self.image_data.ndim == 3)
-            ]
-            if other_polytopes:
-                other_raw, other_scaled = calculate_polytopes_python(
-                    self.image_data, polytopes=tuple(other_polytopes)
-                    )
-                raw_curves.update(other_raw)
-                scaled_curves.update(other_scaled)
-
+                # 2D 'L' still goes through calculate_polytopes_python below, same as before - only 3D 'L'
+                # gets the dedicated branch above, since the 2D path is already validated against the C++.
+                other_polytopes = [name for name in self.selected_polytopes if name not in ('s2', 'c2')]
+                if other_polytopes:
+                    other_raw, other_scaled = calculate_polytopes_python(
+                        self.image_data, polytopes=tuple(other_polytopes)
+                        )
+                    raw_curves.update(other_raw)
+                    scaled_curves.update(other_scaled)
             self.finished.emit(raw_curves, scaled_curves)
         except Exception as e:
             self.error.emit(str(e))
@@ -199,7 +176,7 @@ class SliceEvolutionThread(QThread):
     def __init__(self, image_data: np.ndarray, selected_polytopes: List[str], step: int,
                  reference_index: int = 0, compute_omega: bool = True,
                  compute_delta_omega: bool = True, signed_delta_omega: bool = False,
-                 stack_labels=None):
+                 stack_labels = None, reverse: bool = False):
         super().__init__()
         self.image_data = image_data
         self.selected_polytopes = selected_polytopes
@@ -211,15 +188,24 @@ class SliceEvolutionThread(QThread):
         # Real step/time numbers from the imported filenames (None if this data has none,
         # e.g. a native 3D volume) - see run() below for how these get used.
         self.stack_labels = stack_labels
+        # False = first slice/time-step to last (default); True = last to first. Same
+        # userData convention as SliceEvolutionSettingsDialog.direction_combo.
+        self.reverse = reverse
 
     def run(self):
         try:
             n_slices = self.image_data.shape[0]
 
-            # array_positions: real indices into self.image_data - ALWAYS 0, 1, 2, ...
-            # regardless of what the filenames said, since that's what numpy indexing needs.
-            # e.g. step=1 -> every slice; step=5 -> position 0, 5, 10, 15, ...
-            array_positions = list(range(0, n_slices, self.step))
+            # array_positions: real indices into self.image_data -  which ones, and in what
+            # order, depends on direction. e.g. step=1, reverse=False -> 0, 1, 2, ...;
+            # step=1, reverse=True -> n_slices-1, n_slices-2, ..., 0. Must match the exact
+            # same formula SliceEvolutionSettingsDialog._update_reference_options() used to
+            # build the reference dropdown, or reference_position below could fail to find
+            # self.reference_index in this list.
+            if self.reverse:
+                array_positions = list(range(n_slices - 1, -1, -self.step))
+            else:
+                array_positions = list(range(0, n_slices, self.step))
 
             # slice_indices: what actually gets plotted/exported later. Real filename-derived
             # numbers when we have them (self.stack_labels), otherwise just fall back to the
@@ -230,11 +216,16 @@ class SliceEvolutionThread(QThread):
                 slice_indices = array_positions
 
             # Compute the curves for every slice we're keeping, one call per slice - always
-            # indexed by array POSITION, never by the display numbers above.
+            # indexed by array POSITION, never by the display numbers above. Each "slice" is
+            # either a 2D image (2D time series) or a 3D volume (4D data, self.image_data.ndim
+            # == 4) - pick the matching curve function once, rather than re-checking per slice.
+            
+            compute_curves = compute_3d_polytope_curves if self.image_data.ndim ==4 else compute_2d_polytope_curves
+            
             raw_curves_list = []
             scaled_curves_list = []
             for pos in array_positions:
-                raw, scaled = compute_2d_polytope_curves(self.image_data[pos], self.selected_polytopes)
+                raw, scaled = compute_curves(self.image_data[pos], self.selected_polytopes)
                 raw_curves_list.append(raw)
                 scaled_curves_list.append(scaled)
 
@@ -295,6 +286,8 @@ class ImageViewer(QMainWindow):
         self.stack_labels: Optional[list] = None
         self.current_file_path: Optional[str] = None
         self.current_slice_index: int = 0
+        self.current_time_index: int = 0 # which 3D volume (T axis) is showing, 4D data only
+
 
         # Initialize UI components
         self._setup_ui()
@@ -323,6 +316,22 @@ class ImageViewer(QMainWindow):
         scroll_area.setWidget(self.image_label)
         scroll_area.setWidgetResizable(True)
         self.layout.addWidget(scroll_area)
+
+        # Create slider for the Time axis (4D data only, initially hidden)
+        self.time_slider = QSlider(Qt.Orientation.Horizontal)
+        self.time_slider.setMinimum(0)
+        self.time_slider.setMaximum(0)
+        self.time_slider.setValue(0)
+        self.time_slider.valueChanged.connect(self.on_time_changed)
+        self.time_slider.setVisible(False)
+        self.layout.addWidget(self.time_slider)
+
+        self.time_label = QLabel("Time: 0 / 0")
+        self.time_label.setAlignment(Qt.AlignCenter)
+        self.time_label.setVisible(False)
+        self.layout.addWidget(self.time_label)
+
+
 
         # Create slider for 3D images (initially hidden)
         self.slice_slider = QSlider(Qt.Orientation.Horizontal)
@@ -383,10 +392,12 @@ class ImageViewer(QMainWindow):
         smds_action.setStatusTip("Calculate SMDs from the current image")
         smds_action.triggered.connect(self.open_smd_dialog)
 
-        # # Polytopes
-        # polytope_action = calculate_menu.addAction("Calculate &Polytopes...")
-        # polytope_action.setStatusTip("Calculate polytopes functions (S2, P3H, P3V, P4, P6, L) from the current image")
-        # polytope_action.triggered.connect(self.calculate_polytopes_dialog)
+        slice_evolution_action = smd_menu.addAction("Calculate Slice &Evolution (Z)...")
+        slice_evolution_action.setStatusTip(
+            "Compute 2D SMDs independently on every Z-slice of a 3D volume (top-to-bottom or "
+            "bottom-to-top), with Omega/Delta-Omega evolution metrics"
+        )
+        slice_evolution_action.triggered.connect(self.open_slice_evolution_dialog)
 
         # REV menu
         rev_menu = menubar.addMenu("&REV/RES")
@@ -426,7 +437,7 @@ class ImageViewer(QMainWindow):
             return False, unique_values
         return True, unique_values
 
-    def numpy_to_qpixmap(self, image_data: np.ndarray) -> QPixmap:
+    def numpy_to_qpixmap(self, image_data: np.ndarray, data_min=None, data_max=None) -> QPixmap:
         """
         Convert numpy array to QPixmap for display.
         Uses min-max normalization instead of assuming binary 0/1 values, so this works both
@@ -434,20 +445,29 @@ class ImageViewer(QMainWindow):
         (e.g. 0,1,2,3 -> 0,85,170,255) without overflowing.
 
         Args:
-            image_data: 2D numpy array (binary or multi-label integer values)
+            image_data: 2D numpy array (binary or multi-label integer values) to display
+            data_min, data_max: the value range to normalize against. display_current_slice()
+                passes the WHOLE volume's min/max here, not just this slice's - so a slice
+                that happens to be uniform (e.g. an all-background slice near the end of a
+                segmented stack) still renders correctly (0 -> black) instead of falling into
+                the flat mid-grey fallback below, which should only trigger when the ENTIRE
+                volume is uniform (nothing to normalize against at all). Defaults to this
+                slice's own min/max if not given, for any other caller.
 
         Returns:
             QPixmap for display
         """
 
-        data_min = image_data.min()
-        data_max = image_data.max()
+        if data_min is None:
+            data_min = image_data.min()
+        if data_max is None:
+            data_max = image_data.max()
 
         if data_max > data_min:
             # Normalize to [0, 255]
             normalized = ((image_data.astype(np.float64) - data_min) / (data_max - data_min) * 255).astype(np.uint8)
         else:
-            # every pixel has the same value (e.g. a blank slice) - avoid a divide-by-zero, show flat mid-grey
+            # every pixel in the whole volume has the same value - avoid a divide-by-zero, show flat mid-grey
             normalized = np.full_like(image_data, 128, dtype=np.uint8)
 
         # # For binary images, multiply by 255 to get full white/black contrast
@@ -476,7 +496,9 @@ class ImageViewer(QMainWindow):
             return
 
         # Get the current 2D slice
-        if self.current_image_data.ndim == 3:
+        if self.current_image_data.ndim == 4:
+            current_2d = self.current_image_data[self.current_time_index, self.current_slice_index, :, :]
+        elif self.current_image_data.ndim == 3:
             current_2d = self.current_image_data[self.current_slice_index, :, :]
         else:
             current_2d = self.current_image_data
@@ -484,8 +506,10 @@ class ImageViewer(QMainWindow):
         # Update the image label data for hover
         self.image_label.set_image_data(current_2d)
 
-        # Convert to pixmap and display
-        self.current_pixmap = self.numpy_to_qpixmap(current_2d)
+        # Convert to pixmap and display - pass the WHOLE volume's min/max (not just this
+        # slice's) so a uniform slice (e.g. all-background) still renders correctly instead
+        # of falling back to flat grey (see numpy_to_qpixmap's docstring).
+        self.current_pixmap = self.numpy_to_qpixmap(current_2d, self._display_min, self._display_max)
         scaled_pixmap = self.current_pixmap.scaled(
             self.image_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -495,14 +519,20 @@ class ImageViewer(QMainWindow):
 
     def on_slice_changed(self, value: int):
         """
-        Handle slice slider change.
-
-        Args:
-            value: New slice index
+        Handle Z-slice slider change. Works for both a plain 3D volume (Z, Y, X) and a 4D
+        stack (T, Z, Y, X) - shape[-3] is the Z-axis length either way.
         """
         self.current_slice_index = value
-        if self.current_image_data is not None and self.current_image_data.ndim == 3:
-            self.slice_label.setText(f"Slice: {value} / {self.current_image_data.shape[0] - 1}")
+        if self.current_image_data is not None and self.current_image_data.ndim in (3, 4):
+            self.slice_label.setText(f"Slice: {value} / {self.current_image_data.shape[-3] - 1}")
+            self.display_current_slice()
+
+    def on_time_changed(self, value: int):
+        """Handle Time slider change (4D data only)."""
+
+        self.current_time_index = value
+        if self.current_image_data is not None and self.current_image_data.ndim == 4:
+            self.time_label.setText(f"Time: {value} / {self.current_image_data.shape[0] - 1}")
             self.display_current_slice()
 
     def open_image(self):
@@ -517,80 +547,15 @@ class ImageViewer(QMainWindow):
         if file_path:
             remember_open_dir(file_path)  # so the next Open/Import dialog starts in this same folder
             try:
-                # Load TIF image using PIL
-                pil_image = Image.open(file_path)
-
-                # Check if it's a multi-page TIFF (3D image)
-                image_stack = []
-                try:
-                    while True:
-                        image_stack.append(np.array(pil_image))
-                        pil_image.seek(pil_image.tell() + 1)
-                except EOFError:
-                    pass  # End of frames
-
-                # Convert to numpy array
-                if len(image_stack) > 1:
-                    image_data = np.stack(image_stack, axis=0)
-                else:
-                    image_data = image_stack[0]
+                image_data = self._load_multipage_tif(file_path)
 
                 # # Note whether this image needs binarizing before it can be used in calculations -
                 # doesn't block loading, just informs the status message below.
 
                 is_valid, unique_values = self.validate_binary_image(image_data)
-                # if not is_valid:
-                #     QMessageBox.critical(
-                #         self,
-                #         "Invalid Image",
-                #         f"Error: Image must contain only binary values (0 and 1).\n\n"
-                #         f"Found values: {unique_values}"
-                #     )
-                #     return
-
-                # # Store current image data
-                # self.current_image_data = image_data
-                # self.current_file_path = file_path
-                # self.current_slice_index = 0
-
-                # # Configure slider for 3D images
-                # if image_data.ndim == 3:
-                #     num_slices = image_data.shape[0]
-                #     self.slice_slider.setMaximum(num_slices - 1)
-                #     self.slice_slider.setValue(0)
-                #     self.slice_slider.setVisible(True)
-                #     self.slice_label.setText(f"Slice: 0 / {num_slices - 1}")
-                #     self.slice_label.setVisible(True)
-                # else:
-                #     self.slice_slider.setVisible(False)
-                #     self.slice_label.setVisible(False)
-
-                # # Display the first slice
-                # self.display_current_slice()
-
-                # # Update status
-                # if is_valid:
-                #     self.status_bar.showMessage(f"Loaded: {file_path}")
-                # else:
-                #     self.status_bar.showMessage("Multi-label image loaded. binarization required.")
-                #     QMessageBox.warning(
-                #         self,
-                #         "Binarization Required",
-                #         f"This image has {len(unique_values)} distinct pixel values: {list(unique_values)}.\n\n"
-                #         "use Process > Binarize to convert it to select a foreground label before running calculations."
-                #     )
-
-                # file_name = os.path.basename(file_path)
-                # if image_data.ndim == 3:
-                #     dims = f"{image_data.shape[1]} x {image_data.shape[2]} x {image_data.shape[0]}"
-                # else:
-                #     dims = f"{image_data.shape[0]} x {image_data.shape[1]}"
-                # self.setWindowTitle(f"SMiCA - [{dims}] - {file_name}")
-
+                
                 self.current_file_path = file_path
                 self._finalize_loaded_image(image_data, os.path.basename(file_path), data_mode='3d_volume' if image_data.ndim == 3 else '2d')
-
-
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{str(e)}")
@@ -613,10 +578,33 @@ class ImageViewer(QMainWindow):
 
         self.current_image_data = image_data
         self.current_slice_index = 0
+        self.current_time_index = 0
         self.data_mode = data_mode
         self.stack_labels = stack_labels
 
-        if image_data.ndim == 3:
+        # Computed ONCE for the whole volume (not per-slice) so display_current_slice() can
+        # normalize every slice against the same range - see numpy_to_qpixmap's docstring.
+        self._display_min = float(image_data.min())
+        self._display_max = float(image_data.max())
+
+        if image_data.ndim == 4: 
+            n_time, n_slices = image_data.shape[0], image_data.shape[1]
+
+            self.time_slider.setMaximum(n_time - 1)
+            self.time_slider.setValue(0)
+            self.time_slider.setVisible(True)
+            self.time_label.setText(f"Time: 0 / {n_time - 1}")
+            self.time_label.setVisible(True)
+
+            self.slice_slider.setMaximum(n_slices - 1)
+            self.slice_slider.setValue(0)
+            self.slice_slider.setVisible(True)
+            self.slice_label.setText(f"Slice: 0 / {n_slices - 1}")
+            self.slice_label.setVisible(True)
+
+            dims = f"{image_data.shape[3]} x {image_data.shape[2]} x {n_slices} x {n_time} (X x Y x Z x T)"
+
+        elif image_data.ndim == 3:
             num_slices = image_data.shape[0]
             self.slice_slider.setMaximum(num_slices - 1)
             self.slice_slider.setValue(0)
@@ -653,6 +641,20 @@ class ImageViewer(QMainWindow):
             raise ValueError(f"Not all files have the same shape - found: {shapes}")
         return np.stack(slices, axis=0)
 
+    def _load_and_stack_3d_files(self, file_paths):
+        """Load a list of multi-page TIF files (each a 3D (Z, Y, X) volume) and stack them
+        into a single 4D (T, Z, Y, X) array - one volume per time step."""
+        volumes = [self._load_multipage_tif(p) for p in file_paths]
+
+        not_3d = [v.shape for v in volumes if v.ndim != 3]
+        if not_3d:
+            raise ValueError(f"Expected every file to be a multi-page (3D) TIF, but found a single-page file: shape {not_3d[0]}")
+
+        shapes = {v.shape for v in volumes}
+        if len(shapes) > 1:
+            raise ValueError(f"Not all volumes have the same shape - found: {shapes}")
+
+        return np.stack(volumes, axis=0) 
 
     def open_import_volume_dialog(self):
 
@@ -681,24 +683,43 @@ class ImageViewer(QMainWindow):
         self._finalize_loaded_image(image_data, os.path.basename(dialog.folder_path), data_mode='3d_volume')
 
 
+    def _load_multipage_tif(self, file_path):
+        """
+        Load one TIF file. Returns a 2D (Y, X) array if it's a single-page file, or a 3D
+        (Z, Y, X) array if it's a multi-page file (e.g. an XCT volume saved as one stacked
+        TIF). Shared by open_image() (a single file) and _load_and_stack_3d_files() (many
+        such files, one per time step).
+        """
+
+        pil_image =  Image.open(file_path)
+        frames = []
+        try:
+            while True:
+                frames.append(np.array(pil_image))
+                pil_image.seek(pil_image.tell() + 1)
+        except EOFError:
+            pass # end of frames
+        return np.stack(frames, axis = 0) if len(frames) > 1 else frames[0]
+
+
+
     def open_import_time_series_dialog(self):
 
-        """Import a 2D time series (3D-per-time-step support coming in a later step) from a folder."""
+        """Import a time series (2D slices, or full 3D volumes) of images from a folder."""
 
         dialog = ImportSequenceDialog(ask_file_type= True, parent = self)
 
         if dialog.exec() != QDialog.Accepted:
             return
         
-        if dialog.get_is_3d_files():
-            QMessageBox.information(
-                self,"Not Yet Available",
-                "Importing 3D volumes over time isn't wired up yet - coming in a later step. "
-                "For now, please choose files that are '2D slices'."
-            )
-            return
         try:
-            image_data = self._load_and_stack_2d_files(dialog.get_sorted_file_paths())
+            if dialog.get_is_3d_files():
+                image_data =  self._load_and_stack_3d_files(dialog.get_sorted_file_paths())
+                data_mode = '4d_time_series'
+            else:
+                image_data = self._load_and_stack_2d_files(dialog.get_sorted_file_paths())
+                data_mode = 'time_series'
+
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load time-step images:\n{str(e)}")
@@ -709,7 +730,7 @@ class ImageViewer(QMainWindow):
         # same order as the stack we just built - this is what makes the colorbar/x-axis in
         # the evolution plots show real step/time numbers instead of plain 0,1,2,3...
         self._finalize_loaded_image(
-            image_data, os.path.basename(dialog.folder_path), data_mode='time_series',
+            image_data, os.path.basename(dialog.folder_path), data_mode = data_mode,
             stack_labels=dialog.get_sorted_values(),
         )
 
@@ -741,6 +762,11 @@ class ImageViewer(QMainWindow):
         # Replace the current image with its binarized version: chosen value -> 1, everything else -> 0
         self.current_image_data = np.where(self.current_image_data == foreground_value, 1, 0).astype(np.uint8)
 
+        # Value range changed (e.g. a multi-label 0-4 image is now just 0-1) - refresh the
+        # stored display bounds so numpy_to_qpixmap normalizes against the new range.
+        self._display_min = float(self.current_image_data.min())
+        self._display_max = float(self.current_image_data.max())
+
         # Re-display (same slice index as before, now showing the binarized result)
         self.display_current_slice()
 
@@ -759,11 +785,11 @@ class ImageViewer(QMainWindow):
             QMessageBox.warning(self, "No Image", "Please open an image first.")
             return
         
-        if self.current_image_data.ndim not in (2, 3):
-            QMessageBox.warning(self, "Invalid Image", "Image must be 2D or 3D.")
+        if self.current_image_data.ndim not in (2, 3, 4):
+            QMessageBox.warning(self, "Invalid Image", "Image must be 2D, 3D, or 4D.")
             return
         
-        if self.data_mode == 'time_series':
+        if self.data_mode in ('time_series', '4d_time_series'):
             self.open_slice_evolution_dialog()
             return
         
@@ -844,17 +870,19 @@ class ImageViewer(QMainWindow):
         if self.current_image_data is None:
             QMessageBox.warning(self, "No Image", "Please open an image first.")
             return
-        if self.current_image_data.ndim != 3:
-            QMessageBox.warning(self, "Invalid Image", "This requires a 3D volume or an imported time series.")
+        if self.current_image_data.ndim not in (3, 4):
+            QMessageBox.warning(self, "Invalid Image", "This requires a 3D volume or an imported volume time series.")
             return
         
         # Just controls wording in the dialog/plot titles - "Slice" for a real 3D volume,
-        # "Time step" for an imported time series. The underlying calculation is identical.
+        # "Time step" for an imported time series (2D or 3D-per-step). The underlying calculation is identical either way.
 
-        axis_label = "time step" if self.data_mode == 'time_series' else "slice"
+        axis_label = "time step" if self.data_mode in ('time_series', '4d_time_series') else "slice"
         n_slices = self.current_image_data.shape[0]
 
-        dialog = SliceEvolutionSettingsDialog(n_slices, axis_label=axis_label, stack_labels=self.stack_labels, parent=self)
+        is_3d = self.current_image_data.ndim ==4 # Each time step is itself a 3D volume
+
+        dialog = SliceEvolutionSettingsDialog(n_slices, axis_label=axis_label, stack_labels=self.stack_labels, is_3d = is_3d, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return  # user cancelled
         
@@ -875,6 +903,7 @@ class ImageViewer(QMainWindow):
             compute_delta_omega=dialog.get_compute_delta_omega(),
             signed_delta_omega=dialog.get_signed_delta_omega(),
             stack_labels=self.stack_labels,
+            reverse = dialog.get_reverse_direction(),
         )
         self.evolution_thread.finished.connect(self.on_slice_evolution_finished)
         self.evolution_thread.error.connect(self.on_slice_evolution_error)

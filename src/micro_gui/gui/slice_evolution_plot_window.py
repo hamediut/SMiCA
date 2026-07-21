@@ -168,6 +168,18 @@ class SliceEvolutionPlotWindow(QMainWindow):
         """Map whichever tab is currently showing back to a key in self._figures, by position (see self._tab_keys)."""
         return self._tab_keys[self.tabs.currentIndex()]
 
+    def closeEvent(self, event):
+        """
+        Release every matplotlib figure this window created (one per function tab, plus the
+        Omega tab) when the window closes. plt.subplots() registers each figure with
+        matplotlib's global pyplot registry - without an explicit plt.close(), they stay
+        registered (and in memory) even after this Qt window is gone, which is why repeated
+        Slice Evolution runs eventually trigger matplotlib's "more than 20 figures open" warning.
+        """
+        for fig in self._figures.values():
+            plt.close(fig)
+        super().closeEvent(event)
+
     def save_plots(self):
         """Save whichever tab's figure is currently active."""
         key = self._current_tab_key()

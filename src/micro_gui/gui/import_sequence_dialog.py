@@ -7,9 +7,11 @@ filename.
 import os
 import re
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
-    QComboBox, QTableWidget, QTableWidgetItem, QMessageBox, QRadioButton, QGroupBox
+    QComboBox, QTableWidget, QTableWidgetItem, QMessageBox, QRadioButton, QGroupBox,
+    QSpinBox
 )
 
 from .save_dialog_helper import suggested_open_dir, remember_open_dir
@@ -91,9 +93,36 @@ class ImportSequenceDialog(QDialog):
         number_row.addWidget(self.number_combo, stretch = 1)
         layout.addLayout(number_row)
 
-        self.preview_table = QTableWidget(0, 2)
-        self.preview_table.setHorizontalHeaderLabels(["File name", "Sort value"])
+        select_row = QHBoxLayout()
+        select_all_button = QPushButton("Select All")
+        select_all_button.clicked.connect(lambda: self._set_all_checked(True))
+        select_none_button = QPushButton("Select None")
+        select_none_button.clicked.connect(lambda: self._set_all_checked(False))
+        select_row.addWidget(select_all_button)
+        select_row.addWidget(select_none_button)
+
+        select_row.addSpacing(20) # # visual gap before the range controls
+
+        select_row.addWidget(QLabel("Range - sort value from:"))
+        self.range_from_spin =  QSpinBox()
+        self.range_from_spin.setRange(0, 0)
+        select_row.addWidget(self.range_from_spin)
+        select_row.addWidget(QLabel("to:"))
+        self.range_to_spin = QSpinBox()
+        self.range_to_spin.setRange(0, 0)
+        select_row.addWidget(self.range_to_spin)
+        select_range_button = QPushButton("Select Range")
+        select_range_button.clicked.connect(self._select_range)
+        select_row.addWidget(select_range_button)
+
+        select_row.addStretch()
+        layout.addLayout(select_row)
+
+
+        self.preview_table = QTableWidget(0, 3)
+        self.preview_table.setHorizontalHeaderLabels(["Include" , "File name", "Sort value"])
         self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.setColumnWidth(0, 55)
         layout.addWidget(self.preview_table, stretch=1)
 
         button_layout = QHBoxLayout()
@@ -182,19 +211,63 @@ class ImportSequenceDialog(QDialog):
 
         self.preview_table.setRowCount(len(rows))
         for row_idx, (name, value) in enumerate(rows):
-            self.preview_table.setItem(row_idx, 0, QTableWidgetItem(name))
-            self.preview_table.setItem(row_idx, 1, QTableWidgetItem(str(value)))
+            include_item = QTableWidgetItem()
+            include_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            include_item.setCheckState(Qt.Checked)  # default: everything selected, same as before this feature existed
+            self.preview_table.setItem(row_idx, 0, include_item)
+
+            self.preview_table.setItem(row_idx, 1, QTableWidgetItem(name))
+            self.preview_table.setItem(row_idx, 2, QTableWidgetItem(str(value)))
 
         self._sorted_names_preview = [name for name, _ in rows]
         self._sorted_values_preview = [value for _, value in rows]  # the real extracted numbers, same order
+        
+        # Keep the range spinboxes in sync with whatever sort values actually exist, and
+        # default to the full range - re-runs every time the folder or sort choice changes.
+        self.range_from_spin.setRange(min(self._sorted_values_preview), max(self._sorted_values_preview))
+        self.range_to_spin.setRange(min(self._sorted_values_preview), max(self._sorted_values_preview))
+        self.range_from_spin.setValue(min(self._sorted_values_preview))
+        self.range_to_spin.setValue(max(self._sorted_values_preview))
+        
         self.ok_button.setEnabled(True)
 
+    def _set_all_checked(self, checked: bool):
+        """Toggle every row's checkbox at once - used by the Select All/None buttons."""
+
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.preview_table.rowCount()):
+            self.preview_table.item(row, 0).setCheckState(state)
+
+    def _select_range(self):
+        """Check only the rows whose sort value falls within [from, to] - unchecks everything
+        else, so this always sets the selection to exactly that range rather than adding to
+        whatever was checked before."""
+
+        lo, hi = self.range_from_spin.value(), self.range_to_spin.value()
+
+        if lo > hi:
+            QMessageBox.warning(self, "Invalid Range", " 'From' must be less than or equalto 'To'.")
+            return
+        for row, value in enumerate(self._sorted_values_preview):
+            state = Qt.Checked if lo <= value <= hi else Qt.Unchecked
+            self.preview_table.item(row, 0).setCheckState(state)
+
+
     def _accept(self):
-        self.sorted_file_paths = [os.path.join(self.folder_path, name) for name in self._sorted_names_preview]
-        self.sorted_values = list(self._sorted_values_preview)  # keep the real numbers alongside the paths
+        checked_rows = [
+            row for row in range(self.preview_table.rowCount())
+            if self.preview_table.item(row, 0).checkState() == Qt.Checked
+        ]
+        if not checked_rows:
+            QMessageBox.warning(self, "No files Selected", "Please check at least one file to import.")
+            return
+        
+        self.sorted_file_paths = [os.path.join(self.folder_path, self._sorted_names_preview[row]) for row in checked_rows]
+        self.sorted_values = [self._sorted_values_preview[row] for row in checked_rows]  # same rows, same order
         if self.ask_file_type:
             self.is_3d_files = self.radio_3d.isChecked()
         self.accept()
+
 
     def get_sorted_file_paths(self):
         """Return the list of full file paths, in sorted order, or None if cancelled."""

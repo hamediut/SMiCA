@@ -123,6 +123,13 @@ class PolytopePlotWindow(QMainWindow):
         export_csv_action.setShortcut('Ctrl+E')
         export_csv_action.triggered.connect(self.export_csv)
 
+    def closeEvent(self, event):
+        """Release both matplotlib figures (raw + scaled tabs) when this window closes - see
+        SliceEvolutionPlotWindow.closeEvent for why this is needed."""
+        plt.close(self.fig_raw)
+        plt.close(self.fig_scaled)
+        super().closeEvent(event)
+
     def _save_plots(self):
         """Save the currently active tab's plot as PNG, JPEG, or PDF."""
 

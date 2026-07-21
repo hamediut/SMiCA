@@ -108,6 +108,13 @@ class RevPlotWindow(QMainWindow):
         save_action.setShortcut("Ctrl+S")
         save_action.triggered.connect(self.save_plots)
 
+    def closeEvent(self, event):
+        """Release both matplotlib figures (S2 + F2 tabs) when this window closes - see
+        SliceEvolutionPlotWindow.closeEvent for why this is needed."""
+        plt.close(self.fig_s2)
+        plt.close(self.fig_f2)
+        super().closeEvent(event)
+
     # def save_plots(self):
     #     """Save both plots."""
     #     # You can implement this similar to PlotWindow.save_plot()
