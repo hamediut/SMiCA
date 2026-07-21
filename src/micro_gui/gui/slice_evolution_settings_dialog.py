@@ -44,6 +44,7 @@ class SliceEvolutionSettingsDialog(QDialog):
         self.stack_labels = stack_labels
         self.selected_polytopes = None
         self.step = None
+        self.reverse_direction = None # to add directional 2d smd calculations (e.g., from top to bottom or vice versa)
         self.reference_index = None
         self.compute_omega = None
         self.compute_delta_omega = None
@@ -102,6 +103,23 @@ class SliceEvolutionSettingsDialog(QDialog):
         step_row.addWidget(self.step_spinbox)
         layout.addLayout(step_row)
 
+        ## Directional smds (top-->bottom or vice versa)
+        direction_row = QHBoxLayout()
+        direction_row.addWidget(QLabel("Direction"))
+        self.direction_combo = QComboBox() # drop-down list to select one
+        self.direction_combo.addItem(f"First -> Last {self.axis_label}", userData = False)
+        self.direction_combo.addItem(f"Last -> First {self.axis_label}", userData = True)
+        self.direction_combo.setToolTip(
+            f"\"First -> Last\" processes {self.axis_label} 0, 1, 2, ... in that order - top to "
+            f"bottom, if {self.axis_label} 0 is the top of your volume/stack.\n"
+            f"\"Last -> First\" processes them in reverse order - bottom to top, under the same assumption."
+        )
+        self.direction_combo.currentIndexChanged.connect(self._update_reference_options)
+        direction_row.addWidget(self.direction_combo, stretch=1)
+        layout.addLayout(direction_row)
+
+
+
         omega_group = QGroupBox("Evolution metrics")
         omega_layout = QVBoxLayout()
 
@@ -143,8 +161,15 @@ class SliceEvolutionSettingsDialog(QDialog):
         self._update_reference_options()
 
     def _update_reference_options(self):
-        """Repopulate the reference dropdown to match whichever slices the current step will actually compute."""
-        available_positions = list(range(0, self.n_slices, self.step_spinbox.value()))
+        """Repopulate the reference dropdown to match whichever slices the current step + direction will actually compute."""
+        step = self.step_spinbox.value()
+        reverse = self.direction_combo.currentData()
+
+        if reverse:
+            available_positions = list(range(self.n_slices -1 , -1, -step))
+        else:
+            available_positions = list(range(0, self.n_slices, step))
+
         self.reference_combo.clear()
         for pos in available_positions:
             # Show the real filename-derived number when we have one, so this matches what
@@ -154,19 +179,23 @@ class SliceEvolutionSettingsDialog(QDialog):
             self.reference_combo.addItem(f"{self.axis_label.title()} {display_value}", userData=pos)
 
     def _validate_and_accept(self):
+        self.step = self.step_spinbox.value()
+        self.reverse_direction = self.direction_combo.currentData()
         selected = [name for name, _ in self.POLYTOPE_OPTIONS if self._checkboxes[name].isChecked()]
         if not selected:
             QMessageBox.warning(self, "No Selection", "Please select at least one function.")
             return
 
         self.selected_polytopes = selected
-        self.step = self.step_spinbox.value()
         self.compute_omega = self.omega_checkbox.isChecked()
         self.compute_delta_omega = self.delta_omega_checkbox.isChecked()
         self.signed_delta_omega = self.signed_checkbox.isChecked()
         self.reference_index = self.reference_combo.currentData()
         self.accept()
 
+    def get_reverse_direction(self):
+        return self.reverse_direction
+    
     def get_selected_polytopes(self):
         return self.selected_polytopes
 

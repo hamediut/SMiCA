@@ -176,7 +176,7 @@ class SliceEvolutionThread(QThread):
     def __init__(self, image_data: np.ndarray, selected_polytopes: List[str], step: int,
                  reference_index: int = 0, compute_omega: bool = True,
                  compute_delta_omega: bool = True, signed_delta_omega: bool = False,
-                 stack_labels=None):
+                 stack_labels = None, reverse: bool = False):
         super().__init__()
         self.image_data = image_data
         self.selected_polytopes = selected_polytopes
@@ -188,15 +188,24 @@ class SliceEvolutionThread(QThread):
         # Real step/time numbers from the imported filenames (None if this data has none,
         # e.g. a native 3D volume) - see run() below for how these get used.
         self.stack_labels = stack_labels
+        # False = first slice/time-step to last (default); True = last to first. Same
+        # userData convention as SliceEvolutionSettingsDialog.direction_combo.
+        self.reverse = reverse
 
     def run(self):
         try:
             n_slices = self.image_data.shape[0]
 
-            # array_positions: real indices into self.image_data - ALWAYS 0, 1, 2, ...
-            # regardless of what the filenames said, since that's what numpy indexing needs.
-            # e.g. step=1 -> every slice; step=5 -> position 0, 5, 10, 15, ...
-            array_positions = list(range(0, n_slices, self.step))
+            # array_positions: real indices into self.image_data -  which ones, and in what
+            # order, depends on direction. e.g. step=1, reverse=False -> 0, 1, 2, ...;
+            # step=1, reverse=True -> n_slices-1, n_slices-2, ..., 0. Must match the exact
+            # same formula SliceEvolutionSettingsDialog._update_reference_options() used to
+            # build the reference dropdown, or reference_position below could fail to find
+            # self.reference_index in this list.
+            if self.reverse:
+                array_positions = list(range(n_slices - 1, -1, -self.step))
+            else:
+                array_positions = list(range(0, n_slices, self.step))
 
             # slice_indices: what actually gets plotted/exported later. Real filename-derived
             # numbers when we have them (self.stack_labels), otherwise just fall back to the
@@ -383,10 +392,12 @@ class ImageViewer(QMainWindow):
         smds_action.setStatusTip("Calculate SMDs from the current image")
         smds_action.triggered.connect(self.open_smd_dialog)
 
-        # # Polytopes
-        # polytope_action = calculate_menu.addAction("Calculate &Polytopes...")
-        # polytope_action.setStatusTip("Calculate polytopes functions (S2, P3H, P3V, P4, P6, L) from the current image")
-        # polytope_action.triggered.connect(self.calculate_polytopes_dialog)
+        slice_evolution_action = smd_menu.addAction("Calculate Slice &Evolution (Z)...")
+        slice_evolution_action.setStatusTip(
+            "Compute 2D SMDs independently on every Z-slice of a 3D volume (top-to-bottom or "
+            "bottom-to-top), with Omega/Delta-Omega evolution metrics"
+        )
+        slice_evolution_action.triggered.connect(self.open_slice_evolution_dialog)
 
         # REV menu
         rev_menu = menubar.addMenu("&REV/RES")
@@ -892,6 +903,7 @@ class ImageViewer(QMainWindow):
             compute_delta_omega=dialog.get_compute_delta_omega(),
             signed_delta_omega=dialog.get_signed_delta_omega(),
             stack_labels=self.stack_labels,
+            reverse = dialog.get_reverse_direction(),
         )
         self.evolution_thread.finished.connect(self.on_slice_evolution_finished)
         self.evolution_thread.error.connect(self.on_slice_evolution_error)
