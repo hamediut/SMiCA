@@ -2206,3 +2206,228 @@ def delta_omega(curve_series: List[np.ndarray],
         omega_values.append(omega / n_r)
 
     return np.array(omega_values)
+
+
+# ==============================================================
+# METHOD 1: Mean chord length from the two-point correlation S2
+#   Torquato, Random Heterogeneous Materials, Ch.2, Eq. 2.74:
+#       ell_c^(i) = -phi_i / (dS2/dr)|_{r=0}
+#   Phase-generic: whichever phase's S2 curve is passed in is the phase
+#   the returned chord length is for - there is no separate "grain"
+#   value, since that assumed a binary pore/grain split that doesn't
+#   generalise past two phases.
+# ==============================================================
+
+def chord_length_from_S2(s2, num_points=2, dr=1.0):
+    """
+    Mean chord length of the phase of interest, from its radial S2.
+
+    Parameters
+    ----------
+    s2 : np.ndarray
+        Radial two-point correlation of the PHASE OF INTEREST, with
+        s2[0] = phi (that phase's volume fraction).
+        Sampled at r = 0, dr, 2*dr, ...  (for pixel images, dr = 1).
+    num_points : int
+        Number of small-r points used to fit the slope at the origin.
+        Real S2(r) curves are concave near r=0 (steep initial drop, then
+        flattening), so a fit window wider than a couple of points
+        systematically UNDERESTIMATES the slope magnitude at r=0+ and
+        thus OVERESTIMATES the chord length (validated against the direct
+        run-length method in notebooks/chord_length_comparison.ipynb:
+        num_points=2 agrees with the direct method to a few percent, while
+        num_points=5 overestimates by ~25-35%, growing worse from there).
+        Keep this at 2 (a plain one-step secant) unless there's a specific
+        reason to widen it, and re-validate against the direct method if
+        you do.
+    dr : float
+        Radial spacing between S2 samples (1 pixel for image data).
+
+    Returns
+    -------
+    ell : mean chord length of the phase of interest, same units as dr.
+    """
+    phi = s2[0]                                   # S2(0) = phase-of-interest volume fraction
+
+    # Clip to the number of samples actually available (e.g. small crops
+    # where len(s2) < num_points), so r and s2[:n] always match in length.
+    n = min(num_points, len(s2))
+
+    # Actual r-distances of the first n samples
+    r = np.arange(n) * dr                          # 0, dr, 2*dr, ...
+
+    # Linear fit over the small-r region (S2 is linear near r=0, Eq. 2.32).
+    slope = np.polyfit(r, s2[:n], 1)[0]            # dS2/dr estimated at origin
+    slope_mag = abs(slope)                         # |dS2/dr|_0
+
+    return phi / slope_mag                         # Eq. 2.74
+
+
+# ==============================================================
+# METHOD 2: Chord lengths by DIRECT sampling (run-lengths)
+#   Definition, Eq. 2.67: chords are the line segments of a
+#   scan line that lie entirely within one phase. We measure
+#   run-lengths of consecutive phase pixels along scan lines
+#   and average over directions to approximate isotropy.
+#   This yields the FULL distribution p(z), not just the mean.
+# ==============================================================
+
+def _runs_1d(line):
+    """Run-lengths of consecutive 1s in a 1D binary array, dropping border runs."""
+    padded = np.concatenate(([0], line, [0]))     # sentinel zeros bound the runs
+    diff = np.diff(padded)                          # +1 at start, -1 at end
+    starts = np.where(diff == 1)[0]               # run start indices
+    ends = np.where(diff == -1)[0]                # run end indices
+    lengths = ends - starts                        # run lengths
+    interior = (starts > 0) & (ends < len(line))  # discard truncated border runs
+    return lengths[interior].tolist()
+
+
+def sample_chords_nd(img, phase=1, axes=None):
+    """
+    Direct chord-length sampling for 2D OR 3D binary/labeled images.
+
+    Scans along each requested axis by moving that axis to the front and
+    iterating over all lines parallel to it. Works for any dimensionality.
+
+    Parameters
+    ----------
+    img : np.ndarray        2D or 3D array.
+    phase : int             Value identifying the phase of interest.
+    axes : iterable or None The axes to scan along. Default: all axes
+                            (0,1 for 2D; 0,1,2 for 3D).
+
+    Returns
+    -------
+    np.ndarray of chord lengths (in pixels/voxels).
+    """
+    B = (img == phase).astype(np.uint8)           # binary indicator array
+    if axes is None:
+        axes = range(B.ndim)                       # scan every principal axis
+
+    chords = []                                    # accumulate chords
+    for ax in axes:                                # one scan direction per axis
+        # Move the scan axis to position 0, then flatten the remaining axes so
+        # every row of `lines` is a single scan line parallel to `ax`.
+        moved = np.moveaxis(B, ax, 0)             # scan axis becomes axis 0
+        lines = moved.reshape(moved.shape[0], -1) # columns = individual scan lines
+        for line in lines.T:                       # iterate over each scan line
+            chords += _runs_1d(line)              # collect its chords
+    return np.asarray(chords, dtype=float)
+
+
+def chord_pdf(chords, nbins=40):
+    """
+    Empirical chord-length PDF p(z) and mean chord length (Eq. 2.72).
+
+    Returns
+    -------
+    (z, p_z, mean_chord) : bin centers, normalized density, first moment.
+    """
+    p_z, edges = np.histogram(chords, bins=nbins, density=True)  # normalized p(z)
+    z = 0.5 * (edges[:-1] + edges[1:])            # bin midpoints
+    mean_chord = chords.mean()                     # ell_c = <z>, Eq. 2.72
+    return z, p_z, mean_chord
+
+
+# ==============================================================
+# CONVENIENCE: run both methods and compare, for ONE phase of interest
+# ==============================================================
+
+def compare_chord_methods(img, s2_phase, phase=1, num_points=2, dr=1.0):
+    """
+    Compute the mean chord length of ONE phase both ways and print a
+    side-by-side check.
+
+    Parameters
+    ----------
+    img : np.ndarray
+        2D or 3D image (used by the direct method).
+    s2_phase : np.ndarray
+        Radial S2 of `phase` (s2_phase[0] = that phase's volume fraction) -
+        used by the S2-slope method.
+    phase : int
+        Pixel value identifying the phase of interest. Must match the
+        phase `s2_phase` was computed for.
+
+    Returns
+    -------
+    dict with 'via_S2' and 'direct' mean chord lengths for `phase`.
+    """
+    ell_via_s2 = chord_length_from_S2(s2_phase, num_points, dr)
+
+    _, _, ell_direct = chord_pdf(sample_chords_nd(img, phase=phase))
+
+    print(f"{'':12s}{'via S2':>12s}{'direct':>12s}")
+    print(f"{'phase='+str(phase):12s}{ell_via_s2:12.3f}{ell_direct:12.3f}")
+
+    return {'via_S2': ell_via_s2, 'direct': ell_direct}
+
+
+def compute_chord_length_result(image: np.ndarray, phase: int = 1,
+                                 num_points: int = 2, dr: float = 1.0,
+                                 nbins: int = 40) -> Dict:
+    """
+    Single entry point for the GUI: mean chord length (both methods) and
+    the chord-length distribution of ONE phase, for a 2D image or a 3D
+    volume. Mirrors compute_2d_polytope_curves()/compute_3d_polytope_curves()'s
+    role as the one call a calculation thread needs to make.
+
+    Args:
+        image: 2D or 3D array.
+        phase: pixel value of the phase of interest. Only `1` is
+            supported right now - calculate_s2()/calculate_s2_3d() are
+            hardcoded to var=1 internally, so the S2-based estimate would
+            silently be wrong for any other phase. Raises ValueError
+            otherwise rather than returning an incorrect number.
+        num_points, dr: passed to chord_length_from_S2().
+        nbins: passed to chord_pdf().
+
+    Returns
+    -------
+    dict with keys:
+        'phase': the phase computed (currently always 1)
+        'ell_via_s2': mean chord length from the S2 slope at r=0
+        'ell_direct': mean chord length from direct run-length sampling
+        'chords': raw chord lengths (np.ndarray), for CSV export
+        'z', 'p_z': chord-length PDF bin centers / density
+    """
+    # Guard rather than silently computing a wrong number: calculate_s2/calculate_s2_3d
+    # always measure phase 1 internally, so any other `phase` here would give an
+    # ell_via_s2 that doesn't actually match the `phase` the caller asked for.
+    if phase != 1:
+        raise ValueError(
+            "compute_chord_length_result only supports phase=1 (foreground) - "
+            "calculate_s2()/calculate_s2_3d() are hardcoded to var=1, so the "
+            "S2-based chord length would be wrong for any other phase."
+        )
+
+    # Pick the matching S2 function for the image's dimensionality - this is the
+    # single place that dispatches 2D vs 3D, so callers (GUI threads) don't have to.
+    if image.ndim == 2:
+        s2_phase = calculate_s2(image)
+    elif image.ndim == 3:
+        s2_phase = calculate_s2_3d(image)
+    else:
+        raise ValueError('compute_chord_length_result only supports 2D or 3D images.')
+
+    # Method 1: mean chord length from the S2 slope at r=0 (fast - reuses the S2 curve).
+    ell_via_s2 = chord_length_from_S2(s2_phase, num_points=num_points, dr=dr)
+
+    # Method 2: direct run-length sampling - gives both the mean AND the full
+    # distribution, at the cost of scanning every line in the image/volume.
+    chords = sample_chords_nd(image, phase=phase)
+    z, p_z, ell_direct = chord_pdf(chords, nbins=nbins)
+
+    # Single dict so the GUI thread only has to emit/pass one object around -
+    # 'chords' is kept (not just the histogram) so a plot window can re-bin it
+    # or export the raw values to CSV without recomputing anything.
+    return {
+        'phase': phase,
+        'ndim': image.ndim, # 2 -> pixels, 3 -> voxels; lets callers label units correctly
+        'ell_via_s2': ell_via_s2,
+        'ell_direct': ell_direct,
+        'chords': chords,
+        'z': z,
+        'p_z': p_z,
+    }
