@@ -26,7 +26,8 @@ from ..analysis.smds import (
      calculate_c2_3d, calculate_s2_periodic_3d,
      calculate_L_3d,
      omega_n, delta_omega,
-     compute_2d_polytope_curves, compute_3d_polytope_curves
+     compute_2d_polytope_curves, compute_3d_polytope_curves,
+     compute_chord_length_result
 )
 
 from .rev_settings_dialog import REVSettingsDialog
@@ -39,6 +40,11 @@ from .import_sequence_dialog import ImportSequenceDialog
 from .slice_evolution_settings_dialog import SliceEvolutionSettingsDialog
 from .slice_evolution_plot_window import SliceEvolutionPlotWindow
 
+from .chord_length_settings_dialog import ChordLengthSettingsDialog
+from .chord_length_plot_window import ChordLengthPlotWindow
+
+from .chord_length_evolution_settings_dialog import ChordLengthEvolutionSettingsDialog
+from .chord_length_evolution_plot_window import ChordLengthEvolutionPlotWindow
 
 ## caclulation threads for background processing, so GUI remains responsive
 
@@ -161,6 +167,98 @@ class PolytopeCalculationThread(QThread):
 
 
 ##-----------------------------------------------------
+
+class ChordLengthThread(QThread):
+    """
+    Thread for running Chord Length calculation in the background (keeps the GUI
+    responsive - same reason every other calculation runs in a QThread here).
+    """
+
+    finished = Signal(dict)  # emits the single result dict from compute_chord_length_result
+    error = Signal(str)      # emits a message if something goes wrong, instead of crashing the thread
+
+    def __init__(self, image_data, num_points, nbins):
+        super().__init__()
+        self.image_data = image_data
+        self.num_points = num_points # from the settings dialog - S2 slope fit window
+        self.nbins = nbins           # from the settings dialog - histogram bin count
+
+    def run(self):
+
+        try:
+            result = compute_chord_length_result(
+                self.image_data,
+                phase = 1,
+                num_points = self.num_points,
+                nbins = self.nbins
+            )
+
+            self.finished.emit(result) # success: hand the dict back to the GUI thread
+        except Exception as e:
+            self.error.emit(str(e))
+
+class ChordLengthEvolutionThread(QThread):
+    """
+    Computes Chord Length independently on every slice/time-step of a stack (2D
+    time-series of slices, or a time-series of 3D volumes).
+    """
+    # Just two things, unlike SliceEvolutionThread's 5 - no omega/delta-omega here,
+    # and no separate raw/scaled split (compute_chord_length_result returns one dict).
+
+    finished = Signal(list, list) # (slice_indices, results_list)
+    error = Signal(str)
+
+    def __init__(self, image_data, step: int, num_points: int, nbins: int,
+                 stack_labels = None, reverse: bool = False):
+        
+        super().__init__()
+        self.image_data = image_data
+        self.step = step
+        self.num_points = num_points
+        self.nbins = nbins
+        self.stack_labels = stack_labels
+        self.reverse = reverse
+
+    def run(self):
+
+        try:
+            n_slices = self.image_data.shape[0]
+
+            # Identical formula to SliceEvolutionThread.run() - which array positions
+            # get included, and in what order, from step + direction.
+            if self.reverse:
+                array_positions = list(range(n_slices - 1, -1, -self.step))
+            else:
+                array_positions = list(range(0, n_slices, self.step))
+
+            # Real filename-derived numbers when we have them, otherwise the array
+            # position itself - same as SliceEvolutionThread.
+            if self.stack_labels is not None:
+                slice_indices = [self.stack_labels[pos] for pos in array_positions]
+            else:
+                slice_indices = array_positions
+
+            # One compute_chord_length_result() call per kept slice. self.image_data[pos]
+            # is a 2D image (2D time-series) or a 3D volume (4D time-series of volumes) -
+            # compute_chord_length_result already branches on .ndim internally, so unlike
+            # SliceEvolutionThread we don't need to pick a function based on self.image_data.ndim.
+
+            results_list = []
+            for pos in array_positions:
+                result = compute_chord_length_result(
+                    self.image_data[pos],
+                    phase = 1,
+                    num_points= self.num_points,
+                    nbins= self.nbins,
+                )
+                results_list.append(result)
+
+            self.finished.emit(slice_indices, results_list)
+            
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 
 
 class SliceEvolutionThread(QThread):
@@ -398,6 +496,21 @@ class ImageViewer(QMainWindow):
             "bottom-to-top), with Omega/Delta-Omega evolution metrics"
         )
         slice_evolution_action.triggered.connect(self.open_slice_evolution_dialog)
+
+        # Chord length
+        chord_length_action = smd_menu.addAction("Calculate &Chord Length...")
+        chord_length_action.setStatusTip(
+            "Compute the mean chord length (via S2 slope and direct sampling) and the "
+            "chord-length distribution of the foreground phase"
+        )
+        chord_length_action.triggered.connect(self.open_chord_length_dialog)
+
+        chord_length_evolution_action = smd_menu.addAction("Calculate Chord Length &Evolution...")
+        chord_length_evolution_action.setStatusTip(
+            "Compute chord length independently on every slice/time-step of a stack"
+        )
+        chord_length_evolution_action.triggered.connect(self.open_chord_length_evolution_dialog)
+
 
         # REV menu
         rev_menu = menubar.addMenu("&REV/RES")
@@ -928,6 +1041,131 @@ class ImageViewer(QMainWindow):
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "Calculation Error", f"Error calculating evolution:\n{error_msg}")
         self.status_bar.showMessage(f"Error: {error_msg}")
+
+    def open_chord_length_dialog(self):
+        """Open the Chord Length settings dialog and, on OK, run the calculation."""
+
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
+        # Chord Length evolution across a stack isn't built yet - for now, just refuse
+        # rather than silently doing the wrong thing on a stack. This gets swapped for a
+        # redirect to open_chord_length_evolution_dialog() once that piece exists.
+        if self.data_mode in ('time_series', '4d_time_series'):
+            self.open_chord_length_evolution_dialog()
+            return
+        
+        # compute_chord_length_result only supports 2D or 3D - same guard as open_smd_dialog.
+        if self.current_image_data.ndim not in (2, 3):
+            QMessageBox.warning(self, "Invalid Image", "Image must be 2D or 3D.")
+            return
+        
+        dialog = ChordLengthSettingsDialog(parent = self)
+
+        if dialog.exec() != QDialog.Accepted:
+            return  # user cancelled
+
+        # Show progress bar in status bar - same pattern as open_smd_dialog
+        self.progress_bar.setVisible(True)
+        self.status_bar.showMessage("Calculating chord length...")
+        QApplication.processEvents()  # force the UI to repaint before the (blocking) thread start
+
+        # Keep the thread on self - if it were a local variable, Python could garbage-collect
+        # it mid-run since nothing else holds a reference, silently killing the calculation.
+        self.chord_length_thread = ChordLengthThread(
+            self.current_image_data,
+            dialog.get_num_points(),
+            dialog.get_nbins(), 
+        )
+        self.chord_length_thread.finished.connect(self.on_chord_length_finished)
+        self.chord_length_thread.error.connect(self.on_chord_length_error)
+        self.chord_length_thread.start()
+
+    def on_chord_length_finished(self, result: dict):
+        """Handle completion of Chord Length calculation - runs on the GUI thread."""
+        self.progress_bar.setVisible(False)
+
+        chord_length_window = ChordLengthPlotWindow(result, self)
+        self.plot_windows.append(chord_length_window) # keeps a reference so it isn't garbage-collected
+        chord_length_window.show()
+
+        self.status_bar.showMessage("Chord length calculation completed")
+
+    def on_chord_length_error(self, error_msg: str):
+        """Handle error during Chord Length calculation."""
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "Calculation Error", f"Error calculating chord length:\n{error_msg}")
+        self.status_bar.showMessage(f"Error: {error_msg}")
+
+
+    def open_chord_length_evolution_dialog(self):
+        """Configure and run per-slice/per-time-step Chord Length calculation on the current stack."""
+
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
+
+        if self.current_image_data.ndim not in (3, 4):
+            QMessageBox.warning(self, "Invalid Image",
+                                 "This requires a 3D volume or an imported volume time series.")
+            return
+
+        axis_label = "time step" if self.data_mode in ('time_series', '4d_time_series') else "slice"
+        n_slices = self.current_image_data.shape[0]
+
+        dialog = ChordLengthEvolutionSettingsDialog(n_slices, axis_label = axis_label, parent = self)
+        if dialog.exec() != QDialog.Accepted:
+            return  # user cancelled
+
+        self.progress_bar.setVisible(True)
+        self.status_bar.showMessage(f"Calculating chord length {axis_label} evolution...")
+        QApplication.processEvents()
+
+        # Stash the axis label on self so on_chord_length_evolution_finished (below) can use
+        # it too - same reason open_slice_evolution_dialog does this for _evolution_axis_label.
+        self._chord_length_axis_label = axis_label
+
+        self.chord_length_evolution_thread = ChordLengthEvolutionThread(
+            self.current_image_data,
+            dialog.get_step(),
+            dialog.get_num_points(),
+            dialog.get_nbins(),
+            stack_labels= self.stack_labels,
+            reverse = dialog.get_reverse_direction()
+        )
+
+        self.chord_length_evolution_thread.finished.connect(self.on_chord_length_evolution_finished)
+        self.chord_length_evolution_thread.error.connect(self.on_chord_length_evolution_error)
+        self.chord_length_evolution_thread.start()
+
+    def on_chord_length_evolution_finished(self, slice_indices, results_list):
+        """Handle completion of the chord length evolution calculation - open the results window."""
+        self.progress_bar.setVisible(False)
+
+        window = ChordLengthEvolutionPlotWindow(
+            slice_indices, results_list, axis_label = self._chord_length_axis_label, parent=self
+        )
+
+        self.plot_windows.append(window)
+        window.show()
+
+        self.status_bar.showMessage(f"Chord length {self._chord_length_axis_label} evolution calculation completed")
+
+    def on_chord_length_evolution_error(self, error_msg: str):
+        """Handle error during the chord length evolution calculation."""
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "Calculation Error", f"Error calculating chord length evolution:\n{error_msg}")
+        self.status_bar.showMessage(f"Error: {error_msg}")
+
+
+
+        
+
+
+
+
+        
+
 
 
     ## calculate_rev placeholder
