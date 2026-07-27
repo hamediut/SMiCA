@@ -46,6 +46,14 @@ from .chord_length_plot_window import ChordLengthPlotWindow
 from .chord_length_evolution_settings_dialog import ChordLengthEvolutionSettingsDialog
 from .chord_length_evolution_plot_window import ChordLengthEvolutionPlotWindow
 
+from .minkowski_settings_dialog import MinkowskiSettingsDialog
+from ..analysis.minkowski import minkowski_2d, minkowski_3d
+from .minkowski_results_dialog import MinkowskiResultsDialog
+from .minkowski_evolution_settings_dialog import MinkowskiEvolutionSettingsDialog
+from .minkowski_evolution_plot_window import MinkowskiEvolutionPlotWindow
+
+
+
 ## caclulation threads for background processing, so GUI remains responsive
 
 class REVCalculationThread(QThread):
@@ -259,6 +267,53 @@ class ChordLengthEvolutionThread(QThread):
             self.error.emit(str(e))
 
 
+class MinkowskiEvolutionThread(QThread):
+    """
+    Computes Minkowski functionals independently on every slice/time-step of a
+    stack. Mirrors ChordLengthEvolutionThread's structure - the only real
+    difference is picking minkowski_2d vs minkowski_3d once, based on whether
+    each entry in the stack is a 2D slice or a 3D volume.
+    """
+
+    finished = Signal(list, list) # (slice_indices, results_list)
+    error = Signal(str)
+
+    def __init__(self, image_data, step: int, resolution: float, is_3d: bool,
+                 stack_labels=None, reverse: bool = False):
+        super().__init__()
+        self.image_data = image_data
+        self.step = step
+        self.resolution = resolution
+        self.is_3d = is_3d
+        self.stack_labels = stack_labels
+        self.reverse = reverse
+
+    def run(self):
+            
+
+            try:
+
+                n_slices = self.image_data.shape[0]
+
+                if self.reverse:
+                    array_positions = list(range(n_slices - 1, -1, -self.step))
+                else:
+                    array_positions = list(range(0, n_slices, self.step))
+
+                if self.stack_labels is not None:
+                    slice_indices = [self.stack_labels[pos] for pos in array_positions]
+                else:
+                    slice_indices = array_positions
+
+                compute = minkowski_3d if self.is_3d else minkowski_2d
+
+                results_list = [compute(self.image_data[pos], res=self.resolution) for pos in array_positions]
+
+                self.finished.emit(slice_indices, results_list)
+
+
+            except Exception as e:
+                self.error.emit(str(e))
 
 
 class SliceEvolutionThread(QThread):
@@ -519,6 +574,16 @@ class ImageViewer(QMainWindow):
         rev_action.setStatusTip("Calculate REV from the current image")
         rev_action.triggered.connect(self.calculate_rev)  # Placeholder, implement
         rev_action
+
+        #Image analysis
+        image_analysis_menu = menubar.addMenu("&Image Analysis")
+
+        minkowski_action = image_analysis_menu.addAction("&Calculate Minkowski Functionals...")
+        minkowski_action.setStatusTip(
+            "Compute Minkowski functionals (volume/area, surface/perimeter, "
+            "mean curvature, Euler characteristic) from the current image"
+        )
+        minkowski_action.triggered.connect(self.open_minkowski_dialog)
 
     def _create_status_bar(self):
         """Create the status bar with progress indicator."""
@@ -950,6 +1015,44 @@ class ImageViewer(QMainWindow):
         self.polytope_thread.error.connect(self.on_polytope_calculation_error)
         self.polytope_thread.start()
 
+    def open_minkowski_dialog(self):
+        """Open the Minkowski functionals settings dialog and run the calculation on the current image."""
+
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
+        if self.current_image_data.ndim not in (2, 3, 4):
+            QMessageBox.warning(self, "Invalid Image", "Image must be 2D, 3D, or 4D.")
+            return
+
+        if self.data_mode in ('time_series', '4d_time_series'):
+
+            self.open_minkowski_evolution_dialog()
+            return
+        if self.current_image_data.ndim == 3 and self.data_mode == 'time_series':
+            QMessageBox.warning(
+                self, "Not Applicable",
+                "This is a time series, not a spatial 3D volume - Minkowski functionals "
+                "need a real 3D volume. Time-series analysis tools are coming in a later step."
+            )
+            return
+        is_3d = self.current_image_data.ndim == 3
+        dialog = MinkowskiSettingsDialog(is_3d=is_3d, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return  # user cancelled
+
+        resolution = dialog.get_resolution()
+        unit = dialog.get_unit()
+        result = minkowski_3d(self.current_image_data, res=resolution) if is_3d \
+            else minkowski_2d(self.current_image_data, res=resolution)
+
+
+        result_window = MinkowskiResultsDialog(result, unit, is_3d, self)
+        result_window.show()
+
+
+
+    
     def on_polytope_calculation_finished(self, raw_curves: dict, scaled_curves: dict):
         """Handle completion of polytope calculation.
         (Real plot window comes in the next step - for now just confirm it worked.)
@@ -1158,13 +1261,69 @@ class ImageViewer(QMainWindow):
         self.status_bar.showMessage(f"Error: {error_msg}")
 
 
+    def open_minkowski_evolution_dialog(self):
+        """Configure and run per-slice/per-time-step Minkowski functionals calculation on the current stack."""
 
-        
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
 
+        if self.current_image_data.ndim not in (3, 4):
+            QMessageBox.warning(self, "Invalid Image",
+                                "This requires a 3D volume or an imported volume time series.")
+            return
 
+        axis_label = "time step" if self.data_mode in ('time_series', '4d_time_series') else "slice"
+        n_slices = self.current_image_data.shape[0]
+        is_3d = self.current_image_data.ndim == 4  # each entry is a 3D volume, not a 2D slice
 
+        dialog = MinkowskiEvolutionSettingsDialog(n_slices, axis_label=axis_label, is_3d=is_3d, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return  # user cancelled
 
-        
+        self.progress_bar.setVisible(True)
+        self.status_bar.showMessage(f"Calculating Minkowski functionals {axis_label} evolution...")
+        QApplication.processEvents()
+
+        self._minkowski_evolution_axis_label = axis_label
+        self._minkowski_evolution_unit = dialog.get_unit()
+        self._minkowski_evolution_is_3d = is_3d
+
+        self.minkowski_evolution_thread = MinkowskiEvolutionThread(
+        self.current_image_data,
+        dialog.get_step(),
+        dialog.get_resolution(),
+        is_3d,
+        stack_labels=self.stack_labels,
+        reverse=dialog.get_reverse_direction(),
+
+        )
+
+        self.minkowski_evolution_thread.finished.connect(self.on_minkowski_evolution_finished)
+        self.minkowski_evolution_thread.error.connect(self.on_minkowski_evolution_error)
+        self.minkowski_evolution_thread.start()
+
+    def on_minkowski_evolution_finished(self, slice_indices, results_list):
+        """Handle completion of the Minkowski functionals evolution calculation - open the results window."""
+        self.progress_bar.setVisible(False)
+
+        window = MinkowskiEvolutionPlotWindow(
+            slice_indices, results_list, self._minkowski_evolution_unit, self._minkowski_evolution_is_3d,
+            axis_label=self._minkowski_evolution_axis_label, parent=self
+        )
+        self.plot_windows.append(window)
+        window.show()
+
+        self.status_bar.showMessage(
+            f"Minkowski functionals {self._minkowski_evolution_axis_label} evolution calculation completed"
+        )
+
+    def on_minkowski_evolution_error(self, error_msg: str):
+            
+            """Handle error during the Minkowski functionals evolution calculation."""
+            self.progress_bar.setVisible(False)
+            QMessageBox.critical(self, "Calculation Error", f"Error calculating evolution:\n{error_msg}")
+            self.status_bar.showMessage(f"Error: {error_msg}")
 
 
 
