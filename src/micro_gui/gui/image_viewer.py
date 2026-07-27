@@ -3,6 +3,7 @@ Main image viewer window for the Micro_GUI application.
 """
 
 import os
+import time
 import numpy as np
 from typing import Optional, List
 
@@ -52,6 +53,7 @@ from .minkowski_results_dialog import MinkowskiResultsDialog
 from .minkowski_evolution_settings_dialog import MinkowskiEvolutionSettingsDialog
 from .minkowski_evolution_plot_window import MinkowskiEvolutionPlotWindow
 
+from ..utils.image_utils import load_multipage_tif
 
 
 ## caclulation threads for background processing, so GUI remains responsive
@@ -215,10 +217,11 @@ class ChordLengthEvolutionThread(QThread):
 
     finished = Signal(list, list) # (slice_indices, results_list)
     error = Signal(str)
+    progress = Signal(int, int)  # (completed, total)
 
     def __init__(self, image_data, step: int, num_points: int, nbins: int,
                  stack_labels = None, reverse: bool = False):
-        
+
         super().__init__()
         self.image_data = image_data
         self.step = step
@@ -251,8 +254,9 @@ class ChordLengthEvolutionThread(QThread):
             # compute_chord_length_result already branches on .ndim internally, so unlike
             # SliceEvolutionThread we don't need to pick a function based on self.image_data.ndim.
 
+            total = len(array_positions)
             results_list = []
-            for pos in array_positions:
+            for i, pos in enumerate(array_positions):
                 result = compute_chord_length_result(
                     self.image_data[pos],
                     phase = 1,
@@ -260,14 +264,65 @@ class ChordLengthEvolutionThread(QThread):
                     nbins= self.nbins,
                 )
                 results_list.append(result)
+                self.progress.emit(i + 1, total)
 
             self.finished.emit(slice_indices, results_list)
-            
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+class ChordLengthEvolutionStreamingThread(QThread):
+    """
+    Streaming counterpart to ChordLengthEvolutionThread - loads, computes, and discards
+    ONE volume at a time from a list of file paths, instead of requiring the whole 4D
+    stack to already be loaded in memory.
+    """
+
+    finished = Signal(list, list)
+    error = Signal(str)
+    progress = Signal(int, int)  # (completed, total)
+
+    def __init__(self, file_paths, step: int, num_points: int, nbins: int,
+                 stack_labels=None, reverse: bool = False):
+        super().__init__()
+        self.file_paths = file_paths
+        self.step = step
+        self.num_points = num_points
+        self.nbins = nbins
+        self.stack_labels = stack_labels
+        self.reverse = reverse
+
+    def run(self):
+        try:
+            n_files = len(self.file_paths)
+
+            if self.reverse:
+                array_positions = list(range(n_files - 1, -1, -self.step))
+            else:
+                array_positions = list(range(0, n_files, self.step))
+
+            if self.stack_labels is not None:
+                slice_indices = [self.stack_labels[pos] for pos in array_positions]
+            else:
+                slice_indices = array_positions
+
+            total = len(array_positions)
+            results_list = []
+            for i, pos in enumerate(array_positions):
+                volume = load_multipage_tif(self.file_paths[pos])
+                result = compute_chord_length_result(
+                    volume, phase=1, num_points=self.num_points, nbins=self.nbins,
+                )
+                results_list.append(result)
+                self.progress.emit(i + 1, total)
+
+            self.finished.emit(slice_indices, results_list)
         except Exception as e:
             self.error.emit(str(e))
 
 
 class MinkowskiEvolutionThread(QThread):
+
     """
     Computes Minkowski functionals independently on every slice/time-step of a
     stack. Mirrors ChordLengthEvolutionThread's structure - the only real
@@ -277,6 +332,7 @@ class MinkowskiEvolutionThread(QThread):
 
     finished = Signal(list, list) # (slice_indices, results_list)
     error = Signal(str)
+    progress = Signal(int, int)  # (completed, total)
 
     def __init__(self, image_data, step: int, resolution: float, is_3d: bool,
                  stack_labels=None, reverse: bool = False):
@@ -290,30 +346,90 @@ class MinkowskiEvolutionThread(QThread):
 
     def run(self):
             
+        try:
 
-            try:
+            n_slices = self.image_data.shape[0]
 
-                n_slices = self.image_data.shape[0]
+            if self.reverse:
+                array_positions = list(range(n_slices - 1, -1, -self.step))
+            else:
+                array_positions = list(range(0, n_slices, self.step))
 
-                if self.reverse:
-                    array_positions = list(range(n_slices - 1, -1, -self.step))
-                else:
-                    array_positions = list(range(0, n_slices, self.step))
+            if self.stack_labels is not None:
+                slice_indices = [self.stack_labels[pos] for pos in array_positions]
+            else:
+                slice_indices = array_positions
 
-                if self.stack_labels is not None:
-                    slice_indices = [self.stack_labels[pos] for pos in array_positions]
-                else:
-                    slice_indices = array_positions
+            compute = minkowski_3d if self.is_3d else minkowski_2d
 
-                compute = minkowski_3d if self.is_3d else minkowski_2d
+            total = len(array_positions)
+            results_list = []
+            for i, pos in enumerate(array_positions):
+                results_list.append(compute(self.image_data[pos], res=self.resolution))
+                self.progress.emit(i + 1, total)
 
-                results_list = [compute(self.image_data[pos], res=self.resolution) for pos in array_positions]
+            
 
-                self.finished.emit(slice_indices, results_list)
+            self.finished.emit(slice_indices, results_list)
 
 
-            except Exception as e:
-                self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MinkowskiEvolutionStreamingThread(QThread):
+    """
+    Streaming counterpart to MinkowskiEvolutionThread - for a 4D time series that
+    was imported as a list of file paths (one 3D volume per time step) instead of
+    eagerly loaded and stacked into one big in-memory array. Loads, computes, and
+    discards ONE volume at a time, so peak memory is one volume's worth regardless
+    of how many time steps there are - this is what makes datasets too large to
+    fit in RAM as a single 4D array tractable at all.
+
+    Always 3D (minkowski_3d) - streaming mode exists specifically for "many large
+    3D volumes", where a 2D time-series wouldn't hit the same memory ceiling.
+    """
+
+    finished = Signal(list, list)  # (slice_indices, results_list)
+    error = Signal(str)
+    progress = Signal(int, int)
+
+    def __init__(self, file_paths, step: int, resolution: float,
+                 stack_labels=None, reverse: bool = False):
+        super().__init__()
+        self.file_paths = file_paths
+        self.step = step
+        self.resolution = resolution
+        self.stack_labels = stack_labels
+        self.reverse = reverse
+    
+    def run(self):
+        try:
+            n_files = len(self.file_paths)
+
+            if self.reverse:
+                array_positions = list(range(n_files - 1, -1, -self.step))
+            else:
+                array_positions = list(range(0, n_files, self.step))
+
+            if self.stack_labels is not None:
+                slice_indices = [self.stack_labels[pos] for pos in array_positions]
+            else:
+                slice_indices = array_positions
+
+            total = len(array_positions)
+            results_list = []
+            for i, pos in enumerate(array_positions):
+                # one volume in memory at a time - overwritten (and garbage
+                # collected) the moment the next iteration loads a new one
+                volume = load_multipage_tif(self.file_paths[pos])
+                results_list.append(minkowski_3d(volume, res=self.resolution))
+                self.progress.emit(i + 1, total)
+
+            self.finished.emit(slice_indices, results_list)
+
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class SliceEvolutionThread(QThread):
@@ -325,6 +441,7 @@ class SliceEvolutionThread(QThread):
     # the raw+scaled curves for each of them, and the two Omega-family metric dicts.
     finished = Signal(list, list, list, dict, dict)
     error = Signal(str)
+    progress = Signal(int, int)  # (completed, total)
 
     def __init__(self, image_data: np.ndarray, selected_polytopes: List[str], step: int,
                  reference_index: int = 0, compute_omega: bool = True,
@@ -374,13 +491,15 @@ class SliceEvolutionThread(QThread):
             # == 4) - pick the matching curve function once, rather than re-checking per slice.
             
             compute_curves = compute_3d_polytope_curves if self.image_data.ndim ==4 else compute_2d_polytope_curves
-            
+
+            total = len(array_positions)
             raw_curves_list = []
             scaled_curves_list = []
-            for pos in array_positions:
+            for i, pos in enumerate(array_positions):
                 raw, scaled = compute_curves(self.image_data[pos], self.selected_polytopes)
                 raw_curves_list.append(raw)
                 scaled_curves_list.append(scaled)
+                self.progress.emit(i + 1, total)
 
             # reference_index (from the dialog) is an array POSITION (see
             # SliceEvolutionSettingsDialog) - find where that position sits within
@@ -405,6 +524,80 @@ class SliceEvolutionThread(QThread):
                 if self.compute_delta_omega:
                     delta_omega_dict[name] = delta_omega(curve_series, signed=self.signed_delta_omega)
             # These will be calculated and sent to the plotwindow later
+            self.finished.emit(slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class SliceEvolutionStreamingThread(QThread):
+    """
+    Streaming counterpart to SliceEvolutionThread - for a 4D time series imported as a
+    list of file paths (one 3D volume per time step) instead of eagerly loaded and
+    stacked into one big in-memory array. Loads, computes, and discards ONE volume at a
+    time - same reasoning as MinkowskiEvolutionStreamingThread.
+
+    Always 3D (compute_3d_polytope_curves) - streaming mode only exists for "many large
+    3D volumes".
+    """
+
+    finished = Signal(list, list, list, dict, dict)
+    error = Signal(str)
+    progress = Signal(int, int)  # (completed, total)
+
+    def __init__(self, file_paths, selected_polytopes: List[str], step: int,
+                 reference_index: int = 0, compute_omega: bool = True,
+                 compute_delta_omega: bool = True, signed_delta_omega: bool = False,
+                 stack_labels=None, reverse: bool = False):
+        super().__init__()
+        self.file_paths = file_paths
+        self.selected_polytopes = selected_polytopes
+        self.step = step
+        self.reference_index = reference_index
+        self.compute_omega = compute_omega
+        self.compute_delta_omega = compute_delta_omega
+        self.signed_delta_omega = signed_delta_omega
+        self.stack_labels = stack_labels
+        self.reverse = reverse
+
+    def run(self):
+        try:
+            n_files = len(self.file_paths)
+
+            if self.reverse:
+                array_positions = list(range(n_files - 1, -1, -self.step))
+            else:
+                array_positions = list(range(0, n_files, self.step))
+
+            if self.stack_labels is not None:
+                slice_indices = [self.stack_labels[pos] for pos in array_positions]
+            else:
+                slice_indices = array_positions
+
+            total = len(array_positions)
+            raw_curves_list = []
+            scaled_curves_list = []
+            for i, pos in enumerate(array_positions):
+                # one volume in memory at a time - overwritten (and garbage collected)
+                # the moment the next iteration loads a new one
+                volume = load_multipage_tif(self.file_paths[pos])
+                raw, scaled = compute_3d_polytope_curves(volume, self.selected_polytopes)
+                raw_curves_list.append(raw)
+                scaled_curves_list.append(scaled)
+                self.progress.emit(i + 1, total)
+
+            reference_position = array_positions.index(self.reference_index)
+
+            omega_dict = {}
+            delta_omega_dict = {}
+            for name in self.selected_polytopes:
+                curve_series = [curves[name] for curves in raw_curves_list]
+                if name in ('p3h', 'p3v'):
+                    curve_series = [curve[::2] for curve in curve_series]
+
+                if self.compute_omega:
+                    omega_dict[name] = omega_n(curve_series, reference_index=reference_position)
+                if self.compute_delta_omega:
+                    delta_omega_dict[name] = delta_omega(curve_series, signed=self.signed_delta_omega)
+
             self.finished.emit(slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict)
         except Exception as e:
             self.error.emit(str(e))
@@ -862,23 +1055,7 @@ class ImageViewer(QMainWindow):
 
 
     def _load_multipage_tif(self, file_path):
-        """
-        Load one TIF file. Returns a 2D (Y, X) array if it's a single-page file, or a 3D
-        (Z, Y, X) array if it's a multi-page file (e.g. an XCT volume saved as one stacked
-        TIF). Shared by open_image() (a single file) and _load_and_stack_3d_files() (many
-        such files, one per time step).
-        """
-
-        pil_image =  Image.open(file_path)
-        frames = []
-        try:
-            while True:
-                frames.append(np.array(pil_image))
-                pil_image.seek(pil_image.tell() + 1)
-        except EOFError:
-            pass # end of frames
-        return np.stack(frames, axis = 0) if len(frames) > 1 else frames[0]
-
+        return load_multipage_tif
 
 
     def open_import_time_series_dialog(self):
@@ -889,9 +1066,22 @@ class ImageViewer(QMainWindow):
 
         if dialog.exec() != QDialog.Accepted:
             return
-        
+
+        # Reset here (not just set below) so a PREVIOUS streaming import's file paths can
+        # never leak into a differently-loaded dataset opened via this same method.
+        self.current_volume_file_paths = None
         try:
-            if dialog.get_is_3d_files():
+            if dialog.get_is_3d_files() and dialog.get_low_memory_mode():
+                # Streaming mode: don't load every volume - remember the file paths (used by
+                # MinkowskiEvolutionStreamingThread later) and preview only the FIRST volume,
+                # so a 100-volume dataset that can't fit in RAM as one array still opens.
+                file_paths = dialog.get_sorted_file_paths()
+                self.current_volume_file_paths = file_paths
+                image_data = load_multipage_tif(file_paths[0])
+                data_mode = '4d_time_series_streaming'
+
+            elif dialog.get_is_3d_files():
+                          
                 image_data =  self._load_and_stack_3d_files(dialog.get_sorted_file_paths())
                 data_mode = '4d_time_series'
             else:
@@ -967,7 +1157,7 @@ class ImageViewer(QMainWindow):
             QMessageBox.warning(self, "Invalid Image", "Image must be 2D, 3D, or 4D.")
             return
         
-        if self.data_mode in ('time_series', '4d_time_series'):
+        if self.data_mode in ('time_series', '4d_time_series', '4d_time_series_streaming'):
             self.open_slice_evolution_dialog()
             return
         
@@ -1025,7 +1215,7 @@ class ImageViewer(QMainWindow):
             QMessageBox.warning(self, "Invalid Image", "Image must be 2D, 3D, or 4D.")
             return
 
-        if self.data_mode in ('time_series', '4d_time_series'):
+        if self.data_mode in ('time_series', '4d_time_series', '4d_time_series_streaming'):
 
             self.open_minkowski_evolution_dialog()
             return
@@ -1093,18 +1283,31 @@ class ImageViewer(QMainWindow):
         # Just controls wording in the dialog/plot titles - "Slice" for a real 3D volume,
         # "Time step" for an imported time series (2D or 3D-per-step). The underlying calculation is identical either way.
 
-        axis_label = "time step" if self.data_mode in ('time_series', '4d_time_series') else "slice"
-        n_slices = self.current_image_data.shape[0]
+        axis_label = ("time step" if self.data_mode in
+                      ('time_series', '4d_time_series', '4d_time_series_streaming') else "slice")
+        
+        streaming = self.data_mode == '4d_time_series_streaming'
+        if streaming:
+            n_slices = len(self.current_volume_file_paths)
+            is_3d = True  # streaming mode only exists for "many 3D volumes"
+        else:
+            n_slices = self.current_image_data.shape[0]
+            is_3d = self.current_image_data.ndim == 4  # Each time step is itself a 3D volume
 
-        is_3d = self.current_image_data.ndim ==4 # Each time step is itself a 3D volume
 
         dialog = SliceEvolutionSettingsDialog(n_slices, axis_label=axis_label, stack_labels=self.stack_labels, is_3d = is_3d, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return  # user cancelled
         
-         # Show progress bar in status bar, same pattern as the other calculations
+        step = dialog.get_step()
+        total = len(range(0, n_slices, step))  # same count regardless of direction
+
         self.progress_bar.setVisible(True)
-        self.status_bar.showMessage(f"Calculating {axis_label} evolution...")
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(0)
+        self._evolution_start_time = time.perf_counter()
+        self._evolution_description = "Calculating SMD evolution"
+        self.status_bar.showMessage(f"{self._evolution_description}: 0/{total}")
         QApplication.processEvents()
 
          # Stash the axis label on self so on_slice_evolution_finished (below) can use it too -
@@ -1112,15 +1315,27 @@ class ImageViewer(QMainWindow):
 
         self._evolution_axis_label = axis_label
 
-        self.evolution_thread = SliceEvolutionThread(
-            self.current_image_data, dialog.get_selected_polytopes(), dialog.get_step(),
-            reference_index=dialog.get_reference_index(),
-            compute_omega=dialog.get_compute_omega(),
-            compute_delta_omega=dialog.get_compute_delta_omega(),
-            signed_delta_omega=dialog.get_signed_delta_omega(),
-            stack_labels=self.stack_labels,
-            reverse = dialog.get_reverse_direction(),
-        )
+        if streaming:
+            self.evolution_thread = SliceEvolutionStreamingThread(
+                self.current_volume_file_paths, dialog.get_selected_polytopes(), dialog.get_step(),
+                reference_index=dialog.get_reference_index(),
+                compute_omega=dialog.get_compute_omega(),
+                compute_delta_omega=dialog.get_compute_delta_omega(),
+                signed_delta_omega=dialog.get_signed_delta_omega(),
+                stack_labels=self.stack_labels,
+                reverse = dialog.get_reverse_direction(),
+            )
+        else:
+            self.evolution_thread = SliceEvolutionThread(
+                self.current_image_data, dialog.get_selected_polytopes(), dialog.get_step(),
+                reference_index=dialog.get_reference_index(),
+                compute_omega=dialog.get_compute_omega(),
+                compute_delta_omega=dialog.get_compute_delta_omega(),
+                signed_delta_omega=dialog.get_signed_delta_omega(),
+                stack_labels=self.stack_labels,
+                reverse = dialog.get_reverse_direction(),
+            )
+        self.evolution_thread.progress.connect(self.on_evolution_progress)
         self.evolution_thread.finished.connect(self.on_slice_evolution_finished)
         self.evolution_thread.error.connect(self.on_slice_evolution_error)
         self.evolution_thread.start()
@@ -1129,6 +1344,7 @@ class ImageViewer(QMainWindow):
 
         """Handle completion of the slice/time evolution calculation - open the results window."""
         self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)  # restore indeterminate default for other calculations
 
         window = SliceEvolutionPlotWindow(
             slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict,
@@ -1142,6 +1358,7 @@ class ImageViewer(QMainWindow):
     def on_slice_evolution_error(self, error_msg: str):
         """Handle error during the slice/time evolution calculation."""
         self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)
         QMessageBox.critical(self, "Calculation Error", f"Error calculating evolution:\n{error_msg}")
         self.status_bar.showMessage(f"Error: {error_msg}")
 
@@ -1154,7 +1371,7 @@ class ImageViewer(QMainWindow):
         # Chord Length evolution across a stack isn't built yet - for now, just refuse
         # rather than silently doing the wrong thing on a stack. This gets swapped for a
         # redirect to open_chord_length_evolution_dialog() once that piece exists.
-        if self.data_mode in ('time_series', '4d_time_series'):
+        if self.data_mode in ('time_series', '4d_time_series', '4d_time_series_streaming'):
             self.open_chord_length_evolution_dialog()
             return
         
@@ -1213,30 +1430,53 @@ class ImageViewer(QMainWindow):
                                  "This requires a 3D volume or an imported volume time series.")
             return
 
-        axis_label = "time step" if self.data_mode in ('time_series', '4d_time_series') else "slice"
-        n_slices = self.current_image_data.shape[0]
+        axis_label = ("time step" if self.data_mode in
+                      ('time_series', '4d_time_series', '4d_time_series_streaming') else "slice")
+
+        streaming = self.data_mode == '4d_time_series_streaming'
+        n_slices = len(self.current_volume_file_paths) if streaming else self.current_image_data.shape[0]
+
 
         dialog = ChordLengthEvolutionSettingsDialog(n_slices, axis_label = axis_label, parent = self)
         if dialog.exec() != QDialog.Accepted:
             return  # user cancelled
 
+        step = dialog.get_step()
+        total = len(range(0, n_slices, step))  # same count regardless of direction
+
         self.progress_bar.setVisible(True)
-        self.status_bar.showMessage(f"Calculating chord length {axis_label} evolution...")
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(0)
+        self._evolution_start_time = time.perf_counter()
+        self._evolution_description = "Calculating chord length evolution"
+        self.status_bar.showMessage(f"{self._evolution_description}: 0/{total}")
         QApplication.processEvents()
 
         # Stash the axis label on self so on_chord_length_evolution_finished (below) can use
         # it too - same reason open_slice_evolution_dialog does this for _evolution_axis_label.
         self._chord_length_axis_label = axis_label
 
-        self.chord_length_evolution_thread = ChordLengthEvolutionThread(
-            self.current_image_data,
-            dialog.get_step(),
-            dialog.get_num_points(),
-            dialog.get_nbins(),
-            stack_labels= self.stack_labels,
-            reverse = dialog.get_reverse_direction()
-        )
+        if streaming:
+            self.chord_length_evolution_thread = ChordLengthEvolutionStreamingThread(
+                self.current_volume_file_paths,
+                dialog.get_step(),
+                dialog.get_num_points(),
+                dialog.get_nbins(),
+                stack_labels= self.stack_labels,
+                reverse = dialog.get_reverse_direction()
+            )
 
+        else:
+            self.chord_length_evolution_thread = ChordLengthEvolutionThread(
+                self.current_image_data,
+                dialog.get_step(),
+                dialog.get_num_points(),
+                dialog.get_nbins(),
+                stack_labels= self.stack_labels,
+                reverse = dialog.get_reverse_direction()
+            )
+
+        self.chord_length_evolution_thread.progress.connect(self.on_evolution_progress)
         self.chord_length_evolution_thread.finished.connect(self.on_chord_length_evolution_finished)
         self.chord_length_evolution_thread.error.connect(self.on_chord_length_evolution_error)
         self.chord_length_evolution_thread.start()
@@ -1244,6 +1484,7 @@ class ImageViewer(QMainWindow):
     def on_chord_length_evolution_finished(self, slice_indices, results_list):
         """Handle completion of the chord length evolution calculation - open the results window."""
         self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)  # restore indeterminate default for other calculations
 
         window = ChordLengthEvolutionPlotWindow(
             slice_indices, results_list, axis_label = self._chord_length_axis_label, parent=self
@@ -1257,6 +1498,7 @@ class ImageViewer(QMainWindow):
     def on_chord_length_evolution_error(self, error_msg: str):
         """Handle error during the chord length evolution calculation."""
         self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)
         QMessageBox.critical(self, "Calculation Error", f"Error calculating chord length evolution:\n{error_msg}")
         self.status_bar.showMessage(f"Error: {error_msg}")
 
@@ -1268,37 +1510,62 @@ class ImageViewer(QMainWindow):
             QMessageBox.warning(self, "No Image", "Please open an image first.")
             return
 
-        if self.current_image_data.ndim not in (3, 4):
+        streaming = self.data_mode == '4d_time_series_streaming' 
+
+        if not streaming and self.current_image_data.ndim not in (3, 4):
             QMessageBox.warning(self, "Invalid Image",
                                 "This requires a 3D volume or an imported volume time series.")
             return
 
-        axis_label = "time step" if self.data_mode in ('time_series', '4d_time_series') else "slice"
-        n_slices = self.current_image_data.shape[0]
-        is_3d = self.current_image_data.ndim == 4  # each entry is a 3D volume, not a 2D slice
+        axis_label = ("time step" if self.data_mode in 
+                      ('time_series', '4d_time_series', '4d_time_series_streaming') else "slice")
+        if streaming:
+            n_slices = len(self.current_volume_file_paths)
+            is_3d = True # streaming mode only exists for "many 3D volumes"
+        else:
+            n_slices = self.current_image_data.shape[0]
+            is_3d = self.current_image_data.ndim == 4  # each entry is a 3D volume, not a 2D slice
 
         dialog = MinkowskiEvolutionSettingsDialog(n_slices, axis_label=axis_label, is_3d=is_3d, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return  # user cancelled
 
+        step = dialog.get_step()
+        total = len(range(0, n_slices, step))  # same count regardless of direction
+
         self.progress_bar.setVisible(True)
-        self.status_bar.showMessage(f"Calculating Minkowski functionals {axis_label} evolution...")
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(0)
+        self._evolution_start_time = time.perf_counter()
+        self._evolution_description = "Calculating Minkowski functionals evolution"
+        self.status_bar.showMessage(f"{self._evolution_description}: 0/{total}")
         QApplication.processEvents()
 
         self._minkowski_evolution_axis_label = axis_label
         self._minkowski_evolution_unit = dialog.get_unit()
         self._minkowski_evolution_is_3d = is_3d
 
-        self.minkowski_evolution_thread = MinkowskiEvolutionThread(
-        self.current_image_data,
-        dialog.get_step(),
-        dialog.get_resolution(),
-        is_3d,
-        stack_labels=self.stack_labels,
-        reverse=dialog.get_reverse_direction(),
+        if streaming:
+            self.minkowski_evolution_thread = MinkowskiEvolutionStreamingThread(
+                self.current_volume_file_paths,
+                dialog.get_step(),
+                dialog.get_resolution(),
+                stack_labels=self.stack_labels,
+                reverse=dialog.get_reverse_direction(),
+            )
 
-        )
+        else:
+            self.minkowski_evolution_thread = MinkowskiEvolutionThread(
+            self.current_image_data,
+            dialog.get_step(),
+            dialog.get_resolution(),
+            is_3d,
+            stack_labels=self.stack_labels,
+            reverse=dialog.get_reverse_direction(),
 
+            )
+
+        self.minkowski_evolution_thread.progress.connect(self.on_evolution_progress)
         self.minkowski_evolution_thread.finished.connect(self.on_minkowski_evolution_finished)
         self.minkowski_evolution_thread.error.connect(self.on_minkowski_evolution_error)
         self.minkowski_evolution_thread.start()
@@ -1306,6 +1573,7 @@ class ImageViewer(QMainWindow):
     def on_minkowski_evolution_finished(self, slice_indices, results_list):
         """Handle completion of the Minkowski functionals evolution calculation - open the results window."""
         self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)  # restore indeterminate default for other calculations
 
         window = MinkowskiEvolutionPlotWindow(
             slice_indices, results_list, self._minkowski_evolution_unit, self._minkowski_evolution_is_3d,
@@ -1322,6 +1590,7 @@ class ImageViewer(QMainWindow):
             
             """Handle error during the Minkowski functionals evolution calculation."""
             self.progress_bar.setVisible(False)
+            self.progress_bar.setMaximum(0)
             QMessageBox.critical(self, "Calculation Error", f"Error calculating evolution:\n{error_msg}")
             self.status_bar.showMessage(f"Error: {error_msg}")
 
@@ -1435,3 +1704,20 @@ class ImageViewer(QMainWindow):
             message: Message to display
         """
         self.status_bar.showMessage(message)
+
+    def on_evolution_progress(self, current: int, total: int):
+        """Shared progress handler for every evolution-style calculation (Minkowski, SMD,
+        chord length - streaming or not). Each thread's `progress` signal connects here;
+        self._evolution_description (set right before that thread starts) says which
+        calculation is actually running."""
+
+        self.progress_bar.setValue(current)
+
+        elapsed = time.perf_counter() - self._evolution_start_time
+        eta_text = ""
+        if current > 0:
+            remaining = elapsed / current * (total - current)
+            eta_text = f" - about {remaining:.0f}s remaining"
+
+        self.status_bar.showMessage(f"{self._evolution_description}: {current}/{total}{eta_text}")
+    
