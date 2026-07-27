@@ -12,6 +12,13 @@ Pillow>=10.0.0
 # Visualization
 matplotlib>=3.7.0
 
+# Minkowski functionals (2D/3D microstructure characterisation)
+# NOTE: GPLv3+ licensed (this project is MIT) — kept as an installed
+# dependency, not vendored source, to avoid license conflicts.
+# Cite: Boelens & Tchelepi, "QuantImPy: Minkowski functionals and functions
+# with Python", SoftwareX 16, 2021, 100823. doi:10.1016/j.softx.2021.100823
+quantimpy>=0.4.6
+
 # Development Dependencies (optional)
 # Uncomment for development
 # pytest>=7.4.0
