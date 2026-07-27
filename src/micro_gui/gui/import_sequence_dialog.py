@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
     QComboBox, QTableWidget, QTableWidgetItem, QMessageBox, QRadioButton, QGroupBox,
-    QSpinBox
+    QSpinBox, QCheckBox
 )
 
 from .save_dialog_helper import suggested_open_dir, remember_open_dir
@@ -42,6 +42,7 @@ class ImportSequenceDialog(QDialog):
         self.sorted_file_paths = None  # list of full paths, in final sort order
         self.sorted_values = None      # the actual numbers extracted from each filename, same order as sorted_file_paths
         self.is_3d_files = False       # only meaningful if ask_file_type=True
+        self.low_memory_mode = False   # only meaningful if is_3d_files is True
 
         self._file_names = []          # filenames only (no path)
         self._candidate_numbers = []   # numbers found in each filename, left to right
@@ -85,6 +86,23 @@ class ImportSequenceDialog(QDialog):
             type_group.setLayout(type_layout)
 
             layout.addWidget(type_group)
+
+            self.radio_3d.toggled.connect(self._update_low_memory_visibility)
+
+            self.low_memory_checkbox = QCheckBox(
+                "Low-memory mode: don't preload all volumes (recommended for many/large volumes)"
+            )
+
+            self.low_memory_checkbox.setToolTip(
+                "Only the first volume gets loaded now, for a quick preview. Calculations "
+                "(e.g. Minkowski Functionals) still run on every volume - one at a time, "
+                "loading and discarding each in turn instead of holding them all in memory."
+            )
+
+            self.low_memory_checkbox.setVisible(False)  # only relevant for 3D-volume files
+            layout.addWidget(self.low_memory_checkbox)
+
+
 
         number_row = QHBoxLayout()
         number_row.addWidget(QLabel("Sort by:"))
@@ -138,7 +156,10 @@ class ImportSequenceDialog(QDialog):
         button_layout.addWidget(self.cancel_button)
         layout.addLayout(button_layout)
 
-
+    def _update_low_memory_visibility(self):
+        """The low-memory option only makes sense for 3D-volume files, not 2D slices."""
+        self.low_memory_checkbox.setVisible(self.radio_3d.isChecked())
+    
     def _browse_folder(self):
 
 
@@ -266,9 +287,10 @@ class ImportSequenceDialog(QDialog):
         self.sorted_values = [self._sorted_values_preview[row] for row in checked_rows]  # same rows, same order
         if self.ask_file_type:
             self.is_3d_files = self.radio_3d.isChecked()
+            self.low_memory_mode = self.is_3d_files and self.low_memory_checkbox.isChecked()
         self.accept()
 
-
+    
     def get_sorted_file_paths(self):
         """Return the list of full file paths, in sorted order, or None if cancelled."""
         return self.sorted_file_paths
@@ -281,7 +303,9 @@ class ImportSequenceDialog(QDialog):
         """Only meaningful when ask_file_type=True: True if each file is a 3D volume, False if 2D."""
         return self.is_3d_files
     
-
+    def get_low_memory_mode(self):
+        """Only meaningful when ask_file_type=True and get_is_3d_files() is True."""
+        return self.low_memory_mode
             
         
 
