@@ -126,21 +126,27 @@ This is what you'd use while actively editing the source in an editor like VS Co
    - `Import Time Series/4D Dataset (2D or 3D per step)` - a folder of multiple time steps; check "Low-memory mode" if you have many large 3D volumes that won't fit in RAM at once.
    - For 3D/4D data, use the slice/time sliders to navigate.
 
+   <img src="docs/Screenshot_MainWindow.png" width="700" alt="Main window with an image loaded">
+
 2. **Binarize if needed** (`Process > Binarize`): pick which pixel value is the foreground; everything else becomes background.
 
 3. **Run an analysis**:
    - `SMDs > Calculate SMDs` (or `Calculate Slice Evolution` for a stack) - select which functions to compute.
+
+     <img src="docs/SliceTimeEvolutionSetting.png" width="500" alt="Slice/time evolution settings dialog - selecting which SMDs to compute on an imported time series">
+
    - `SMDs > Calculate Chord Length` (or `Calculate Chord Length Evolution`).
    - `REV/RES > Calculate REV/RES` (`Ctrl+R`).
    - `Image Analysis > Calculate Minkowski Functionals` - single image or evolution, automatically detected from what's loaded.
 
+     <img src="docs/Screenshot_MinkowskiFunctionals.png" width="700" alt="Minkowski Functionals evolution results - Euler characteristic tab, raw and specific values across a 3D time series">
+
+   Example evolution result (Omega/Delta-Omega across a time series):
+
+   <img src="docs/TimeSeries-EvolutionResults.png" width="700" alt="Omega and Delta-Omega evolution plot across a time series">
+
 4. **Export Results**: every plot window has `File > Save Plot as Image` and `File > Export Data as CSV`; the Minkowski results table has its own `Save to CSV` button.
 
-### Image Requirements
-
-- **Format**: TIF or TIFF (supports multi-page TIFF for 3D volumes)
-- **Values**: Binary images with pixel values of 0 and 1 only
-- **Bit depth**: 8-bit or 16-bit grayscale
 
 ## Project Structure
 
