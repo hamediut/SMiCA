@@ -16,12 +16,12 @@ with open(os.path.join(this_directory, 'requirements.txt'), encoding='utf-8') as
 setup(
     name='micro-gui',
     version='0.1.0',
-    author='Hamed',  # Update with your name
-    author_email='amiiri.hamed@gmail.com',  # Update with your email
+    author='Hamed Amiri',
+    author_email='amiiri.hamed@gmail.com',
     description='GUI Application for Statistical Microstructure Characterisation and Analysis',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    url='https://github.com/hamediut/SMiCA',  # Update with your GitHub URL
+    url='https://github.com/hamediut/SMiCA',
     packages=find_packages(where='src'),
     package_dir={'': 'src'},
     classifiers=[
@@ -29,7 +29,7 @@ setup(
         'Intended Audience :: Science/Research',
         'Topic :: Scientific/Engineering :: Image Processing',
         'Topic :: Scientific/Engineering :: Physics',
-        'License :: OSI Approved :: MIT License',  # Update if different
+        'License :: OSI Approved :: MIT License',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',

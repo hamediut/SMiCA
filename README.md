@@ -1,6 +1,6 @@
 # SMiCA: Statistical Microstructure Characterisation & Analysis
 
-A professional GUI application for analyzing microstructure images using correlation functions and statistical analysis methods, specifically designed for materials science and microstructure characterization.
+A GUI application for analyzing microstructure images using correlation functions, Minkowski functionals, and other statistical/morphological descriptors, specifically designed for materials science and microstructure characterization.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
@@ -8,26 +8,45 @@ A professional GUI application for analyzing microstructure images using correla
 
 ## Features
 
-### Current Features ✅
+### Image Loading & Large-Dataset Support
 
-- **Binary Image Analysis**: Load and analyze binary TIF/TIFF images (2D and 3D)
-- **3D Volume Support**: Navigate through multi-page TIFF files with slice-by-slice viewing
-- **SMDS Calculations**:
-  - Two-point correlation function (S2) and scaled autocovariance (F2) computation in 2D and 3D.
-  - Optimized with Numba JIT compilation for performance
-- **Representative Elementary Size**:
-  - Representative Elementary Size analysis in 2D and 3D images using S2 and F2 functions ([Amiri et al., 2024](https://doi.org/10.1029/2024JH000178)).
-- **Interactive Visualization**:
-  - Real-time pixel value display on mouse hover
-  - Coordinate tracking
-  - Matplotlib-based result plotting
-- **Data Export**:
-  - Save correlation plots as PNG, JPEG, or PDF
-  - Export S2 values to CSV for custom plotting and further analysis
-- **Professional UI**:
-  - PySide6-based Qt interface
-  - Progress indicators for long calculations
-  - Thread-based background processing (non-blocking UI)
+- **Single 2D/3D images**: open a binary TIF/TIFF file directly (multi-page TIFF = 3D volume).
+- **3D volume from Z-slice folder**: assemble one 3D volume from a folder of 2D slice files.
+- **Time series / 4D datasets from a folder**: each time step can be a single 2D slice or a full 3D volume, sorted by a number extracted from the filenames (with a range/select picker).
+- **Low-memory streaming mode**: for datasets with many large 3D volumes (e.g. dozens of XCT volumes) that don't fit in RAM as one 4D array, only the file paths are kept and volumes are loaded, processed, and discarded one at a time - peak memory stays at "one volume's worth" regardless of how many time steps there are.
+- **Interactive viewer**: slice/time sliders for 3D and 4D data, real-time pixel value on hover, coordinate tracking.
+
+### Statistical Microstructure Descriptors (SMDs)
+
+- Two-point correlation function (S2) and its scaled form (F2), in 2D and 3D.
+- Two-point cluster function (C2), in 2D and 3D.
+- Additional 2D polytope functions: P3H, P3V (triangles), P4 (square), P6 (hexagon).
+- Lineal-path function (L), in 2D and 3D.
+- **Evolution across a stack**: compute any of the above independently on every slice/time-step of a 3D or 4D dataset, with Omega and Delta-Omega evolution metrics relative to a reference slice.
+- JIT-compiled with Numba for performance.
+
+### Chord Length
+
+- Mean chord length via the S2 slope (r=0) and via direct run-length sampling, plus the chord-length distribution, for a single 2D/3D image.
+- Evolution across a 3D/4D stack, with an interactive slice picker for comparing chord-length distributions.
+
+### Representative Elementary Volume/Size (REV/RES)
+
+- REV (3D) / RES (2D) analysis using S2 and F2 across randomly sampled sub-volumes, following [Amiri et al., 2024](https://doi.org/10.1029/2024JH000178).
+
+### Minkowski Functionals
+
+- 2D: area, perimeter, Euler characteristic (plus area fraction, specific perimeter, specific Euler characteristic).
+- 3D: volume, surface area, mean curvature, Euler characteristic (plus porosity, specific surface area, specific mean curvature, specific Euler characteristic).
+- Computed via [QuantImPy](https://github.com/boeleman/quantimpy), with the library's internal Mecke-normalization constants corrected back out so the reported values are the true physical/topological quantities (matching the classical integral-geometry definitions), not QuantImPy's raw normalized output.
+- Single-image results in a table with CSV export, or evolution across a 2D/3D time series or 4D dataset (same low-memory streaming support as above).
+
+
+### Data Export & Visualization
+
+- Matplotlib-based plotting for every result type, with tabs for multi-function/multi-tab results.
+- Save plots as PNG, JPEG, or PDF; export underlying data as CSV.
+
 
 ## Installation
 
@@ -41,7 +60,7 @@ A professional GUI application for analyzing microstructure images using correla
 ```bash
 # Clone the repository
 git clone https://github.com/hamediut/SMiCA.git
-cd Micro_GUI
+cd SMiCA
 
 # Create and activate conda environment
 conda create -n gui_micro python=3.10
@@ -59,7 +78,7 @@ pip install -e .
 ```bash
 # Clone the repository
 git clone https://github.com/hamediut/SMiCA.git
-cd Micro_GUI
+cd SMiCA
 
 # Create virtual environment
 python -m venv venv
@@ -77,40 +96,45 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+> **Note on licensing**: this project is MIT-licensed, but the Minkowski functionals feature depends on [QuantImPy](https://github.com/boeleman/quantimpy), which is GPLv3+. It's used as an ordinary installed dependency (not vendored source), which keeps this project's own code MIT while still being able to use it - see `requirements.txt` for details and the citation to use if you publish results computed with it.
+
 ## Usage
 
 ### Running the Application
 
-#### Method 1: Run the main script
-```bash
-python ImageViewer.py
-```
+#### Method 1: Run as an installed package (for using the app)
 
-#### Method 2: Run as installed package (after `pip install -e .`)
 ```bash
 micro-gui
 ```
 
-#### Method 3: Run from source
+This only works after `pip install -e .` has been run once (see Installation above) - that step registers `micro-gui` as a command in your environment (on Windows it creates `micro-gui.exe` in the environment's `Scripts` folder; on Linux/Mac a `micro-gui` script in `bin`). Once installed, as long as the environment is activated, typing `micro-gui` launches the app **from any directory** - you don't need to be inside the cloned repo, and you don't need to know anything about how the source code is organized. This is the way to run the app day-to-day once it's installed, e.g. for a user who just wants to use it rather than edit its code.
+
+#### Method 2: Run the entry-point script directly (for development)
+
 ```bash
-python -m src.micro_gui.main
+python ImageViewer.py
 ```
+
+This is what you'd use while actively editing the source in an editor like VS Code - it does **not** require `pip install -e .` at all, only the dependencies from `requirements.txt`. It works because `ImageViewer.py` sits at the repo root and imports `src.micro_gui` directly, so it only needs to be run from the repo root with the dependencies installed. Any change you make to the source under `src/micro_gui/` takes effect the next time you run this command - nothing needs to be reinstalled.
 
 ### Basic Workflow
 
-1. **Load an Image**:
-   - Click `File > Open Image` (or press `Ctrl+O`)
-   - Select a binary TIF/TIFF file (values must be 0 and 1)
-   - For 3D images, use the slider to navigate through slices
+1. **Load data** (`File` menu):
+   - `Open Single 2D/3D Image` (`Ctrl+O`) - one binary TIF/TIFF file.
+   - `Import Single 3D Volume (from Z-Slice Files)` - assemble one volume from a folder of 2D slices.
+   - `Import Time Series/4D Dataset (2D or 3D per step)` - a folder of multiple time steps; check "Low-memory mode" if you have many large 3D volumes that won't fit in RAM at once.
+   - For 3D/4D data, use the slice/time sliders to navigate.
 
-2. **Calculate SMDS**:
-   - Click `Calculate > Calculate SMDS` (or press `Ctrl+S`)
-   - Wait for the calculation to complete
-   - A new window will display the S2 correlation function plot
+2. **Binarize if needed** (`Process > Binarize`): pick which pixel value is the foreground; everything else becomes background.
 
-3. **Export Results**:
-   - In the plot window, use `File > Save Plot as Image` (`Ctrl+P`)
-   - Or `File > Export Data as CSV` (`Ctrl+E`) for raw data
+3. **Run an analysis**:
+   - `SMDs > Calculate SMDs` (or `Calculate Slice Evolution` for a stack) - select which functions to compute.
+   - `SMDs > Calculate Chord Length` (or `Calculate Chord Length Evolution`).
+   - `REV/RES > Calculate REV/RES` (`Ctrl+R`).
+   - `Image Analysis > Calculate Minkowski Functionals` - single image or evolution, automatically detected from what's loaded.
+
+4. **Export Results**: every plot window has `File > Save Plot as Image` and `File > Export Data as CSV`; the Minkowski results table has its own `Save to CSV` button.
 
 ### Image Requirements
 
@@ -123,111 +147,21 @@ python -m src.micro_gui.main
 ```
 SMiCA/
 ├── src/
-│   └── micro_gui/              # Main package
-│       ├── __init__.py
-│       ├── main.py             # Entry point
-│       ├── gui/                # GUI components
-│       │   ├── __init__.py
-│       │   ├── image_viewer.py     # Main window
-│       │   ├── plot_window.py      # SMDs plot display
-│       │   ├── rev_plot_window.py  # REV/RES plot display
-│       │   ├── rev_settings_dialog.py  # REV/RES settings
-│       │   └── widgets.py          # Custom widgets
-│       ├── analysis/           # Analysis algorithms
-│       │   ├── __init__.py
-│       │   └── smds.py         # SMDs and REV/RES calculations
-│       └── utils/              # Utility functions
-│           ├── __init__.py
-│           └── image_utils.py  # Image processing utilities
-├── tests/                      # Unit tests
-│   ├── __init__.py
-│   ├── test_smds.py
-│   ├── test_image_utils.py
-│   ├── test_plot_window.py
-│   └── test_rev_plot_window.py
-├── ImageViewer.py              # Main entry point (backward compatible)
-├── requirements.txt            # Python dependencies
-├── setup.py                    # Package installation script
-├── LICENSE                     # MIT License
-├── .gitignore
+│   └── micro_gui/           # Main package
+│       ├── main.py          # Entry point
+│       ├── gui/             # Main window, menus, and one settings-dialog/plot-window pair per analysis
+│       ├── analysis/        # Analysis algorithms, no Qt dependency (SMDs, chord length, REV/RES, Minkowski functionals)
+│       └── utils/           # Image loading/info utilities
+├── tests/                   # Unit tests
+├── notebooks/               # Validation/comparison notebooks
+├── cpp_poly/                # Reference C++ implementation used to validate the Python/Numba polytope functions
+├── ImageViewer.py           # Entry-point script
+├── requirements.txt
+├── setup.py
+├── LICENSE                  # MIT License
 └── README.md
 ```
 
-<!-- ## Development
-
-### Setting Up for Development
-
-```bash
-# Install development dependencies
-pip install -r requirements.txt
-# Uncomment dev dependencies in requirements.txt first
-
-# Install pre-commit hooks (optional)
-# pip install pre-commit
-# pre-commit install
-``` -->
-
-<!-- ### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=src/micro_gui tests/
-
-# Run specific test file
-pytest tests/test_smds.py -v
-```
-
-### Code Style
-
-This project follows PEP 8 style guidelines. Use `black` for formatting:
-
-```bash
-black src/ tests/
-``` -->
-
-<!-- ## Algorithm Details
-
-### SMDs (Statistical Microstructure Descriptors)
-
-The application calculates two-point correlation functions S₂(r), which measure the probability that two points separated by distance r both belong to the same phase in a binary microstructure.
-
-**For 2D images**:
-- Calculates correlations in x and y directions
-- Averages results for isotropic measure
-- Returns values for r = 0 to r_max (half of image size)
-
-**For 3D volumes**:
-- Calculates correlations in x, y, and z directions
-- Averages all three directions
-- Returns values for r = 0 to r_max (half of minimum dimension)
-
-**Performance**:
-- JIT-compiled with Numba for near-C performance
-- Background threading prevents UI freezing
-- Typical processing time: ~1-10 seconds for 256³ volumes -->
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## Roadmap
-
-### Planned Features (Phase 2-4)
-
-- [ ] Higher-order correlation functions (3-point and higher polytope functions)
-- [ ] Connectiity descriptors (Lineal-path and cluster connectivity)
-- [ ] Minkowski functional computation for 2D and 3D images
-- [ ] Quantify evolution of these measures for 4D images
-- [ ] Executable distribution (standalone .exe)
 
 ## Citation
 
@@ -242,49 +176,44 @@ If you use this software in your research, please cite:
 }
 ```
 
+If you use the Minkowski functionals feature, please also cite QuantImPy:
+
+```bibtex
+@article{boelens2021quantimpy,
+  title = {QuantImPy: Minkowski functionals and functions with Python},
+  author = {Boelens, Arnout M.P. and Tchelepi, Hamdi A.},
+  journal = {SoftwareX},
+  volume = {16},
+  pages = {100823},
+  year = {2021},
+  doi = {10.1016/j.softx.2021.100823}
+}
+```
+
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the LICENSE file for details. Note that the optional Minkowski functionals feature depends on QuantImPy, which is GPLv3+ (see "Note on licensing" under Installation).
 
 ## Acknowledgments
 
 - Built with [PySide6](https://wiki.qt.io/Qt_for_Python) for the GUI
 - Uses [Numba](https://numba.pydata.org/) for performance optimization
+- Minkowski functionals computed with [QuantImPy](https://github.com/boeleman/quantimpy)
 - Visualization powered by [Matplotlib](https://matplotlib.org/)
 
-## Contact
-
-Hamed Amiri - amiiri.hamed@gmail.com
-
-Project Link: [https://github.com/hamediut/SMiCA](https://github.com/hamediut/SMiCA)
-
-## Troubleshooting
-
-### Common Issues
-
-**Q: "conda is not recognized"**
-- Use Anaconda Prompt instead of regular terminal, or
-- Initialize conda in your shell: `conda init powershell` (Windows) or `conda init bash` (Linux/Mac)
-
-**Q: "Image must contain only binary values (0 and 1)"**
-- Your image needs preprocessing to convert to binary
-- Segment your images into binary values (1 for your feature of interest)
-
-**Q: Application is slow/freezing**
-- For very large 3D volumes (>512³), calculations may take several minutes
-- The UI should remain responsive due to background threading
-- Consider downsampling very large datasets
-
-**Q: Import errors when running**
-- Make sure you've activated your conda environment: `conda activate gui_micro`
-- Verify all dependencies are installed: `pip install -r requirements.txt`
 
 ## Version History
 
+- **v0.2.0** (2026-07) - Major feature expansion
+  - Minkowski functionals (2D/3D, single image and evolution across a stack/4D dataset)
+  - Chord length calculation (single image and evolution)
+  - Low-memory streaming mode for large 4D datasets (many large 3D volumes)
+  - Progress bars with time estimates for evolution-style calculations
+  - Reorganized menus (`Image Analysis` menu added)
 - **v0.1.0** (2025-01-17) - Initial alpha release
   - Basic 2D/3D image loading
   - SMDs calculation
-  - REV\RES analysis
+  - REV/RES analysis
   - Plot visualization and export
 
 ---

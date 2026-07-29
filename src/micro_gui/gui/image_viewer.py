@@ -704,17 +704,20 @@ class ImageViewer(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("&File")
 
-        open_action = file_menu.addAction("&Open Image")
+        open_action = file_menu.addAction("&Open Single 2D/3D Image")
         open_action.setShortcut("Ctrl+O")
-        open_action.setStatusTip("Open a TIF image file")
+        open_action.setStatusTip("Open a single 2D or 3D TIF image file")
         open_action.triggered.connect(self.open_image)
 
-        import_volume_action = file_menu.addAction("Import &Volume from Slice Folder")
-        import_volume_action.setStatusTip("Import a 3D volume from a folder of 2D Z-slice image files")
+        import_volume_action = file_menu.addAction("Import Single 3D &Volume (from Z-Slice Files)")
+        import_volume_action.setStatusTip("Assemble a single 3D volume from a folder of 2D Z-slice image files")
         import_volume_action.triggered.connect(self.open_import_volume_dialog)
 
-        import_timeseries_action = file_menu.addAction("Import &Time Series from Folder...")
-        import_timeseries_action.setStatusTip("Import a time series of 2D images from a folder")
+        import_timeseries_action = file_menu.addAction("Import &Time Series/4D Dataset (2D or 3D per step)")
+        import_timeseries_action.setStatusTip(
+            "Import multiple time steps from a folder - each step can be a single 2D slice "
+            "or a full 3D volume; large 3D-volume datasets can use \n low-memory mode to avoid "
+            "loading everything at once")
         import_timeseries_action.triggered.connect(self.open_import_time_series_dialog)
 
         exit_action = file_menu.addAction("E&xit")
@@ -1055,7 +1058,7 @@ class ImageViewer(QMainWindow):
 
 
     def _load_multipage_tif(self, file_path):
-        return load_multipage_tif
+        return load_multipage_tif(file_path)
 
 
     def open_import_time_series_dialog(self):

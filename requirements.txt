@@ -2,12 +2,17 @@
 PySide6>=6.5.0
 
 # Scientific Computing
-numpy>=1.24.0
+# NOTE: numpy is capped below 2.0 because quantimpy's compiled extension (see below) was
+# built against the NumPy 1.x C API - importing it under NumPy 2.x raises
+# "ValueError: numpy.dtype size changed, may indicate binary incompatibility" at runtime.
+numpy>=1.24.0,<2.0
 numba>=0.57.0
 pandas>=2.0.0
+tqdm>=4.65.0
 
 # Image Processing
 Pillow>=10.0.0
+tifffile>=2023.7.10
 
 # Visualization
 matplotlib>=3.7.0
