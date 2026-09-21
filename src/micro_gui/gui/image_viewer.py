@@ -56,7 +56,11 @@ from .minkowski_evolution_plot_window import MinkowskiEvolutionPlotWindow
 from ..utils.image_utils import load_multipage_tif
 
 #connected components
-from ..analysis.connected_components import connected_components_2d, connected_components_3d, compute_shape_measurements
+from ..analysis.connected_components import (
+    connected_components_2d, connected_components_3d,
+    compute_shape_measurements, compute_advanced_shape_measurements, ADVANCED_MEASUREMENTS,
+)
+
 from .connected_components_results_dialog import ConnectedComponentsResultsDialog
 from .measurements_settings_dialog import MeasurementsSettingsDialog
 from .connected_components_settings_dialog import ConnectedComponentsSettingsDialog
@@ -475,11 +479,12 @@ class MeasurementsThread(QThread):
     finished = Signal(object) # Emits the merged, rescaled pandas DataFrame
     error = Signal(str)
 
-    def __init__(self, cc_result: dict, is_3d: bool, resolution: float):
+    def __init__(self, cc_result: dict, is_3d: bool, resolution: float, selected_measurements: List):
         super().__init__()
         self.cc_result = cc_result
         self.is_3d = is_3d
         self.resolution = resolution
+        self.selected_measurements = selected_measurements
 
     def run(self):
         try:
@@ -497,6 +502,19 @@ class MeasurementsThread(QThread):
                 )
 
             merged_table = table.merge(shape_table, on='label', how='left')
+
+            # Only run the expensive pass if something from it was actually ticked.
+            # Unlike the cheap measurements above, these cost real time, so the
+            # checkboxes gate the computation itself, not just what gets displayed.
+
+            requested_advanced = [m for m in self.selected_measurements if m in ADVANCED_MEASUREMENTS]
+
+            if self.is_3d and requested_advanced:
+                advanced_table = compute_advanced_shape_measurements(
+                    self.cc_result['labels'], res=self.resolution, requested = requested_advanced
+                    )
+                merged_table = merged_table.merge(advanced_table, on='label', how='left')
+
             self.finished.emit(merged_table)
 
         except Exception as e:
@@ -1482,7 +1500,8 @@ class ImageViewer(QMainWindow):
         self.status_bar.showMessage("Computing measurements...")
         QApplication.processEvents()
 
-        self.measurements_thread = MeasurementsThread(self.cc_result, self._cc_is_3d, dialog.get_resolution())
+        self.measurements_thread = MeasurementsThread(
+            self.cc_result, self._cc_is_3d, dialog.get_resolution(), self._measurements_selected)
         self.measurements_thread.finished.connect(self.on_measurements_finished)
         self.measurements_thread.error.connect(self.on_measurements_error)
         self.measurements_thread.start()

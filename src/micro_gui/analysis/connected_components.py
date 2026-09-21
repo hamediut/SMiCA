@@ -238,6 +238,19 @@ def _safe_axes_and_orientation(region):
     return major_length, intermediate_length, minor_length, theta_deg, phi_deg
 
 
+##------------------------------------------------------------------------------------Advance measurements------------------------------------------------------------------------------------##
+# Which measurements come from compute_advanced_shape_measurements rather than
+# compute_shape_measurements. "Expensive" is the real distinction: these need a
+# per-component mesh reconstruction or eigendecomposition, so callers gate them
+# on what the user actually asked for instead of always computing them.
+
+ADVANCED_MEASUREMENTS = frozenset({
+    'surface_area', 'specific_surface_area', 'sphericity',
+    'elongation', 'flatness', 'theta_deg', 'phi_deg',
+})
+
+
+
 def compute_advanced_shape_measurements(labels: np.ndarray, res: float, requested: list) -> pd.DataFrame:
     """Compute the remaining per-component 3D shape/orientation measurements:
     surface_area, specific_surface_area, sphericity (need a per-component

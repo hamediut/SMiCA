@@ -10,6 +10,10 @@ from PySide6.QtWidgets import (
     QPushButton, QGroupBox, QFormLayout
 )
 
+
+from ..analysis.connected_components import ADVANCED_MEASUREMENTS
+
+
 class MeasurementsSettingsDialog(QDialog):
     """
     Dialog to configure the measurement step run on an already-labeled
@@ -26,7 +30,16 @@ class MeasurementsSettingsDialog(QDialog):
     _MEASUREMENTS_3D = [
         ('equivalent_diameter', 'Equivalent diameter'),
         ('aspect_ratio', 'Aspect ratio'),
+        ('surface_area', 'Surface area'),
+        ('specific_surface_area', 'Specific surface area'),
+        ('sphericity', 'Sphericity'),
+        ('elongation', 'Elongation'),
+        ('flatness', 'Flatness'),
+        ('theta_deg', 'Orientation theta'),
+        ('phi_deg', 'Orientation phi'),
     ]
+
+
     _MEASUREMENTS_2D = [
         ('equivalent_diameter', 'Equivalent diameter'),
         ('aspect_ratio', 'Aspect ratio'),
@@ -116,12 +129,26 @@ class MeasurementsSettingsDialog(QDialog):
         self.measurement_checkboxes = {}
         for column_name, display_name in self.measurement_defs:
             checkbox = QCheckBox(display_name)
-            checkbox.setChecked(True) # opt-out, not opt-in - most users want everything
+            # Cheap regionprops-based measurements default on; the mesh/eigenvector ones
+            # default off, since they cost ~45s on a volume with thousands of components.
+
+            checkbox.setChecked(column_name not in ADVANCED_MEASUREMENTS)
             measurements_layout.addWidget(checkbox)
             self.measurement_checkboxes[column_name] = checkbox
 
         measurements_group.setLayout(measurements_layout)
         layout.addWidget(measurements_group)
+
+        if self.is_3d:
+            slow_note = QLabel(
+                "Surface area, specific surface area, sphericity, elongation, flatness and "
+                "orientation need a per-component mesh reconstruction - noticeably slower on "
+                "volumes with many components."
+            )
+
+            slow_note.setWordWrap(True)
+            layout.addWidget(slow_note)
+
 
          # --- OK / Cancel ---
         button_layout = QHBoxLayout()

@@ -30,6 +30,15 @@ class ConnectedComponentsResultsDialog(QDialog):
         'equivalent_diameter': 1,
         'perimeter': 1,
         'specific_perimeter': -1,
+        'surface_area': 2,
+        'specific_surface_area': -1,
+    }
+
+    # Columns whose auto-generated header reads badly ("Theta Deg"), and whose
+    # unit is fixed rather than derived from the voxel size.
+    _HEADER_OVERRIDES = {
+        'theta_deg': 'Theta (deg)',
+        'phi_deg': 'Phi (deg)',
     }
 
     # Maps an exponent to its Unicode superscript suffix, so a unit string can be
@@ -90,6 +99,9 @@ class ConnectedComponentsResultsDialog(QDialog):
         for col in columns:
             if col in known_labels:
                 headers.append(known_labels[col])
+                continue
+            if col in self._HEADER_OVERRIDES:
+                headers.append(self._HEADER_OVERRIDES[col])
                 continue
             label = col.replace('_', ' ').title()
             exponent = self._MEASUREMENT_UNIT_EXPONENTS.get(col)
