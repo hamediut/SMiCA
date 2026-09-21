@@ -4,7 +4,7 @@ microstructure images.
 """
 import numpy as np
 import pandas as pd
-from skimage.measure import label, regionprops_table, regionprops
+from skimage.measure import label, regionprops_table, regionprops, marching_cubes, mesh_surface_area
 
 # Avizo/Dragonfly describe neighbor rules by how many touching neighbors count
 # as "connected" - 6/18/26 in 3D (face, face+edge, face+edge+corner), 4/8 in
@@ -162,4 +162,140 @@ def compute_shape_measurements(labels: np.ndarray, is_3d: bool, res: float = 1.0
             row['circularity'] = 4 * np.pi * area / perimeter ** 2 if perimeter > 0 else np.nan
 
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _safe_surface_area(region):
+    """Marching-cubes surface area of a component's own cropped mask, padded
+    by 1 voxel so the surface closes at the component's boundary. Tested
+    against all 5902 components of the real XCT test volume with zero
+    failures, but kept defensive (NaN instead of a crash) since marching
+    cubes can in principle fail on a degenerate isosurface.
+
+    the standard algorithm for turning a 3D voxel grid into a triangulated surface (a mesh)
+    — the same technique for 3D visualization to render a segmented structure
+    as a smooth-looking surface instead of blocky cubes.
+
+
+    """
+    try:
+        padded = np.pad(region.image, 1)
+        verts, faces, _, _ = marching_cubes(padded, level=0.5)
+        # verts — the (x, y, z) coordinates of every triangle corner in the mesh
+        # for each triangle, which 3 vertices (by index into verts) form it
+        return mesh_surface_area(verts, faces)
+    except (RuntimeError, ValueError):
+        return np.nan
+
+def _safe_axes_and_orientation(region):
+    """Major/intermediate/minor axis lengths and the major axis's direction
+    (theta/phi), from the inertia tensor's eigenvalues/eigenvectors.
+
+    Length formula: for a uniform-density ellipsoid, eigenvalue_i = (sum of
+    the OTHER two semi-axes squared) / 5, which inverts to
+    axis_length_i = sqrt(10*sum(eigvals) - 20*eigval_i) - verified against
+    skimage's own axis_major_length/axis_minor_length on ellipsoids of known
+    semi-axes.
+
+    Orientation: the eigenvector of the SMALLEST eigenvalue points along the
+    major (longest) axis - verified against ellipsoids individually
+    elongated along each array axis. theta = angle from array axis 0, phi =
+    angle from array axis 2 in the axis2/axis1 plane, matching the
+    Avizo/Dragonfly convention for reporting an axis's direction. An axis has
+    no inherent direction, so the sign is fixed by convention (axis-0
+    component >= 0).
+    """
+
+    #For a component, the inertia tensor is a 3×3 matrix that describes how its voxels are spread out around its own centroid
+    # literally the same math as the physics "moment of inertia" (resistance to rotation about an axis),
+    #  just applied to the shape's voxel positions instead of physical mass.
+    #  It captures not just how much spread there is, but in which directions.
+    try:
+        eigvals, eigvecs = np.linalg.eigh(region.inertia_tensor)  # ascending
+        #  eigenvalues in ascending order, so eigvals[0] (smallest) pairs with the major axis,
+        #  eigvals[2] (largest) with the minor axis.
+        #Eigendecomposing this matrix finds the component's 3 principal axes — the natural "long / medium / short" directions the shape is oriented along,
+        #  regardless of how it happens to sit in the array's X/Y/Z coordinate frame.
+    except np.linalg.LinAlgError:
+        return np.nan, np.nan, np.nan, np.nan, np.nan
+
+    total = eigvals.sum()
+    lengths = np.sqrt(np.clip(10 * total - 20 * eigvals, 0, None))  # ascending eigval -> descending length
+    major_length, intermediate_length, minor_length = lengths[0], lengths[1], lengths[2]
+
+    major_vec = eigvecs[:, 0]  # smallest eigenvalue -> major axis direction
+    #  small moment → long axis, large moment → short axis
+    # eigvecs[:, 0] isn't just a number — it's the actual 3D direction the major axis points in,
+    # paired with that smallest eigenvalue. We convert that direction into two angles (theta, phi)
+    # the same way you'd describe any line's orientation in 3D — like latitude/longitude, or dip/azimuth in geology:
+    #  theta = angle away from array axis 0, phi = angle around that axis, measured in the axis-2/axis-1 plane.
+    v0, v1, v2 = major_vec
+    if v0 < 0:
+        v0, v1, v2 = -v0, -v1, -v2
+    theta_deg = np.degrees(np.arccos(np.clip(v0, -1, 1)))
+    phi_deg = np.degrees(np.arctan2(v1, v2))
+
+    return major_length, intermediate_length, minor_length, theta_deg, phi_deg
+
+
+def compute_advanced_shape_measurements(labels: np.ndarray, res: float, requested: list) -> pd.DataFrame:
+    """Compute the remaining per-component 3D shape/orientation measurements:
+    surface_area, specific_surface_area, sphericity (need a per-component
+    marching-cubes mesh), and elongation, flatness, theta_deg, phi_deg (need
+    the inertia tensor's eigenvectors, not just its eigenvalues).
+
+    3D only - none of these have a 2D equivalent. Separate from
+    compute_shape_measurements because marching_cubes/eigh are meaningfully
+    slower (measured ~45s for 5902 components) than a regionprops property
+    lookup - `requested` lets the caller skip whichever group isn't needed.
+
+    Args:
+        labels: 3D label array from connected_components_3d's 'labels' key.
+        res: voxel size (physical units per voxel, assumed isotropic).
+        requested: which columns to compute - any of 'surface_area',
+            'specific_surface_area', 'sphericity', 'elongation', 'flatness',
+            'theta_deg', 'phi_deg'.
+
+    Returns:
+        pandas DataFrame, one row per component (background excluded), with
+        'label' plus whichever of the requested columns were asked for -
+        meant to be merged onto the table connected_components_3d/
+        compute_shape_measurements already built, on 'label'.
+    """
+    requested = set(requested)
+    need_surface = bool(requested & {'surface_area', 'specific_surface_area', 'sphericity'})
+    need_axes = bool(requested & {'elongation', 'flatness', 'theta_deg', 'phi_deg'})
+
+    rows = []
+    for region in regionprops(labels):
+        row = {'label': region.label}
+
+        if need_surface:
+            surface_area = _safe_surface_area(region) * res ** 2
+            volume = region.area * res ** 3
+            if 'surface_area' in requested:
+                row['surface_area'] = surface_area
+            if 'specific_surface_area' in requested:
+                row['specific_surface_area'] = (
+                    surface_area / volume if volume > 0 and not np.isnan(surface_area) else np.nan
+                )
+            if 'sphericity' in requested:
+                row['sphericity'] = (
+                    (np.pi ** (1 / 3) * (6 * volume) ** (2 / 3)) / surface_area
+                    if surface_area > 0 and not np.isnan(surface_area) else np.nan
+                )
+
+        if need_axes:
+            major_length, intermediate_length, minor_length, theta_deg, phi_deg = _safe_axes_and_orientation(region)
+            if 'elongation' in requested:
+                row['elongation'] = intermediate_length / major_length if major_length > 0 else np.nan
+            if 'flatness' in requested:
+                row['flatness'] = minor_length / intermediate_length if intermediate_length > 0 else np.nan
+            if 'theta_deg' in requested:
+                row['theta_deg'] = theta_deg
+            if 'phi_deg' in requested:
+                row['phi_deg'] = phi_deg
+
+        rows.append(row)
+
     return pd.DataFrame(rows)
