@@ -14,6 +14,37 @@ from .histogram_plot_window import HistogramPlotWindow
 from .histogram_settings_dialog import HistogramSettingsDialog
 
 
+class _NumericTableItem(QTableWidgetItem):
+    """Table cell that displays formatted text but sorts on its real number.
+
+    QTableWidgetItem's default comparison is on the displayed string, so a
+    numeric column would sort lexicographically - "1000" before "925", because
+    "1" < "9". Keeping the raw value alongside the formatted text lets the
+    display stay readable (.4g) while sorting stays correct.
+    """
+
+    def __init__(self, text, value):
+        super().__init__(text)
+        self.value = value
+
+    def __lt__(self, other):
+        #__lt__ is Python's special method for the < operator.
+        if not isinstance(other, _NumericTableItem):
+            return super().__lt__(other)
+
+        # NaN compares False against everything, which would leave the order
+        # unstable - sink NaNs instead. Plenty of components produce NaN
+        # elongation/flatness, so this matters here.
+
+        if np.isnan(self.value):
+            return False  # self is NaN, sink it
+        if np.isnan(other.value):
+            return True  # other is NaN, sink it
+
+        return self.value < other.value  # both are real numbers, compare normally
+
+
+
 class ConnectedComponentsResultsDialog(QDialog):
     """
     Read-only results table for a connected-components calculation - one row
@@ -128,13 +159,19 @@ class ConnectedComponentsResultsDialog(QDialog):
         for row, record in enumerate(self.table_data.itertuples(index=False)):
             record = record._asdict()  # convert namedtuple to dict for easier access by column name
             for col_idx, col in enumerate(columns):
-                text = str(int(record[col])) if col == 'label' else f"{record[col]:.4g}"
-                table.setItem(row, col_idx, QTableWidgetItem(text))
+                value = record[col]
+                text = str(int(value)) if col == 'label' else f"{value:.4g}"
+                table.setItem(row, col_idx, _NumericTableItem(text, float(value)))
 
 
         # Clicking a column header selects that column for histogram plotting.
         table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
 
+        # Enabled only AFTER the rows are in. With sorting active during
+        # population, Qt re-sorts on every insertion and the rows come out
+        # scrambled - a classic QTableWidget gotcha.
+
+        table.setSortingEnabled(True)
         self.table = table
         layout.addWidget(table)
 
