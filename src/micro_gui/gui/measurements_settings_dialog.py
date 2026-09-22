@@ -35,8 +35,8 @@ class MeasurementsSettingsDialog(QDialog):
         ('sphericity', 'Sphericity'),
         ('elongation', 'Elongation'),
         ('flatness', 'Flatness'),
-        ('theta_deg', 'Orientation theta'),
-        ('phi_deg', 'Orientation phi'),
+        ('inclination_deg', 'Inclination (0=vertical, 90=horizontal)'),
+        ('azimuth_deg', 'Azimuth (in-plane direction)'),
     ]
 
 

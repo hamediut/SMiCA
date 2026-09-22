@@ -34,11 +34,11 @@ class ConnectedComponentsResultsDialog(QDialog):
         'specific_surface_area': -1,
     }
 
-    # Columns whose auto-generated header reads badly ("Theta Deg"), and whose
-    # unit is fixed rather than derived from the voxel size.
+    # Columns whose auto-generated header reads badly ("Inclination Deg"), and whose
+    # unit is fixed (degrees) rather than derived from the voxel size.
     _HEADER_OVERRIDES = {
-        'theta_deg': 'Theta (deg)',
-        'phi_deg': 'Phi (deg)',
+        'inclination_deg': 'Inclination (deg)',
+        'azimuth_deg': 'Azimuth (deg)',
     }
 
     # Maps an exponent to its Unicode superscript suffix, so a unit string can be
