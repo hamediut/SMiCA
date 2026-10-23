@@ -57,7 +57,7 @@ from ..utils.image_utils import load_multipage_tif
 
 #connected components
 from ..analysis.connected_components import (
-    connected_components_2d, connected_components_3d,
+    connected_components_2d, connected_components_3d, connected_components_2d_stack,
     compute_shape_measurements, compute_advanced_shape_measurements, ADVANCED_MEASUREMENTS,
 )
 
@@ -452,16 +452,21 @@ class ConnectedComponentsThread(QThread):
     finished = Signal(object) # Emits the dict connected_components_2d/_3d returns
     error = Signal(str)
 
-    def __init__(self, image_data:np.ndarray, connectivity:int, is_3d: bool):
+    def __init__(self, image_data:np.ndarray, connectivity:int, is_3d: bool, per_frame: bool = False):
         super().__init__()
 
         self.image_data = image_data
         self.connectivity = connectivity
         self.is_3d = is_3d
+        self.per_frame = per_frame # 2D time series: label each frame on its own
 
     def run(self):
         try:
-            compute = connected_components_3d if self.is_3d else connected_components_2d
+            if self.per_frame:
+                compute  = connected_components_2d_stack
+            else:
+                compute = connected_components_3d if self.is_3d else connected_components_2d
+
             result = compute(self.image_data, connectivity=self.connectivity, res= 1.0)
             self.finished.emit(result)
         except Exception as e:
@@ -809,7 +814,7 @@ class ImageViewer(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("&File")
 
-        open_action = file_menu.addAction("&Open Single 2D/3D Image")
+        open_action = file_menu.addAction("&Import Single 2D/3D Image")
         open_action.setShortcut("Ctrl+O")
         open_action.setStatusTip("Open a single 2D or 3D TIF image file")
         open_action.triggered.connect(self.open_image)
@@ -1441,18 +1446,34 @@ class ImageViewer(QMainWindow):
     def open_connected_components_dialog(self):
         """Open the connected-components settings dialog and run labeling on the current image."""
 
+        if self.data_mode in ('4d_time_series', '4d_time_series_streaming'):
+            # Streaming mode only holds the FIRST volume as a preview (ndim 3),
+            # so without this it'd be labelled as if that one time step were
+            # the whole dataset.
+            QMessageBox.warning(
+                self, "Not Available",
+                "Connected components isn't available for 3D time series (4D data) "
+                "yet - it works on single 2D images, 3D volumes, and 2D time series."
+            )
+            return
+
+
         if self.current_image_data is None:
             QMessageBox.warning(self, "No Image", "Please open an image first.")
             return
         if self.current_image_data.ndim not in (2, 3):
             QMessageBox.warning(
                 self, "Not applicable",
-                "Connected components needs a single 2D image or 3D volume - "
-                "time-series support is coming in a later step."
+                "Connected components needs a single 2D image, a 3D volume, or a 2D time series."
             )
             return
 
-        is_3d = self.current_image_data.ndim == 3
+        # A 2D time series is stacked as (T, H, W) - ndim 3, same as a volume -
+        # so shape alone can't tell them apart; data_mode can. Each frame gets
+        # 2D connectivity (4/8), not 3D (6/18/26).
+        per_frame = self.data_mode == 'time_series'
+        is_3d = self.current_image_data.ndim == 3 and not per_frame
+
         dialog = ConnectedComponentsSettingsDialog(is_3d=is_3d, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return # user cancelled
@@ -1464,7 +1485,8 @@ class ImageViewer(QMainWindow):
         QApplication.processEvents()
 
         self.cc_thread = ConnectedComponentsThread(
-            self.current_image_data, connectivity=dialog.get_connectivity(), is_3d=is_3d
+            self.current_image_data, connectivity=dialog.get_connectivity(),
+             is_3d=is_3d, per_frame=per_frame
         )
 
         self.cc_thread.finished.connect(self.on_connected_components_finished)
@@ -1492,9 +1514,17 @@ class ImageViewer(QMainWindow):
         self.show_cc_colors = True
         self.display_current_slice()
 
-        self.status_bar.showMessage(
-            f"Connected components: {result['num_components']} found -"
-            f"run Image Analysis > Measurements... to filter/measure them")
+        if self.data_mode == 'time_series':
+            n_frames = self.current_image_data.shape[0]
+            self.status_bar.showMessage(
+                f"Connected components: {result['num_components']} found across "
+                f"{n_frames} frames, each frame labelled separately."
+            )
+        else:
+
+            self.status_bar.showMessage(
+                f"Connected components: {result['num_components']} found - "
+                f"run Image Analysis > Measurements... to filter/measure them")
 
     def on_connected_components_error(self, error_msg: str):
         """Handle error during connected-components labeling."""
@@ -1506,6 +1536,22 @@ class ImageViewer(QMainWindow):
     def open_measurements_dialog(self):
         """Open the measurements settings dialog and run measurements on the last
         connected-components result."""
+
+        # Checked before the cc_result guard on purpose - "run Connected
+        # Components first" would just send someone into a dead end.
+        # Same mode tuple Minkowski uses to route to its evolution dialog.
+
+        if self.data_mode in ('time_series', '4d_time_series', '4d_time_series_streaming'):
+            QMessageBox.information(
+                self, "Measurements Not Available",
+                "Measurements are currently available for single 2D images and 3D"
+                " volumes only.\n \n" \
+                "Time series (2D + time or 3D + time) aren't supported yet - per-frame "
+                "measurement tables are planned for a later version. Connected "
+                "Components still works on 2D time series, labelling each frame "
+                "separately."
+            )
+            return
 
         if self.cc_result is None:
             QMessageBox.warning(

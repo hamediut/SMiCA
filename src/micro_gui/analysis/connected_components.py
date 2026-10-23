@@ -109,6 +109,55 @@ def connected_components_3d(image: np.ndarray, connectivity: int = 26, res: floa
         size_exponent=3, count_col='voxel_count', measure_col='volume',
     )
 
+def connected_components_2d_stack(stack: np.ndarray, connectivity: int = 8, res: float = 1.0) -> dict:
+    """Label each 2D frame of a (T, H, W) time series independently.
+
+    Treating a 2D time series as a 3D volume connects components across time -
+    a pore that drifts between frames comes out as one 3D object. Here every
+    frame is labelled on its own with 2D connectivity.
+
+    Label ids are offset per frame so they're unique across the whole stack:
+    each component gets its own colour (rather than label 5 in every frame
+    sharing one, which would look like a tracked object), and a label id alone
+    identifies (frame, component) for any per-frame measurements added later.
+
+    Args:
+        stack: (T, H, W) array. Any nonzero pixel counts as foreground.
+        connectivity: 4 or 8, as for connected_components_2d.
+        res: pixel size (physical units per pixel, assumed isotropic).
+
+    Returns:
+        dict with the same keys as connected_components_2d - 'labels' (int32,
+        same shape as `stack`), 'num_components' (total across all frames),
+        and 'table' (one row per component, plus a 'frame' column).
+    """
+
+    labels = np.zeros(stack.shape, dtype=np.int32)   # int32: half the memory of int64, still 2 billion ids
+    tables = []
+
+    offset = 0
+
+    for t in range(stack.shape[0]):
+        frame = connected_components_2d(stack[t], connectivity = connectivity, res = res)
+        labels[t] = np.where(frame['labels'] > 0, frame['labels'] + offset, 0)
+
+        table = frame['table'].copy()
+        table['label'] += offset
+        table.insert(1, 'frame', t) # column right after 'label'
+        tables.append(table)
+
+        offset += frame['num_components']
+
+    return {
+        'labels': labels,
+        'num_components': offset,
+        'table': pd.concat(tables, ignore_index=True),
+    }
+
+
+
+
+
 def _safe_prop(region, name):
     """Some regionprops properties (axis_major_length/axis_minor_length in
     particular) can raise ValueError('math domain error') for degenerate
