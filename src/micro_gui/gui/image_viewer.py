@@ -1107,9 +1107,33 @@ class ImageViewer(QMainWindow):
         time series's numbers don't linger and get wrongly reused for whatever gets loaded next.
         """
 
+        # Normalise shapes that are really 2D but arrive with a third axis,
+        # otherwise every `ndim == 3` check downstream treats them as volumes:
+        # an RGB/RGBA image (H, W, 3|4), or a single-page stack (1, H, W).
+
+        if image_data.ndim == 3:
+            if image_data.shape[-1] in (3, 4):  # RGB or RGBA. in RGBA case, drop the alpha channel which controls transparency.
+                # Colour channels, not slices. These images are expected to be
+                # binary/greyscale here, so collapse to one channel rather than
+                # doing a weighted RGB->grey conversion.
+                image_data = image_data[..., 0]
+            elif image_data.shape[0] == 1:  # single-page stack, not a volume
+                image_data = image_data[0]
+
+        # A 2D array can only be a plain 2D image, whatever mode the caller
+        # guessed from the pre-normalisation shape. Several tools route on
+        # data_mode (Minkowski sends 'time_series' to the evolution dialog),
+        # so a stale mode would push a 2D image down a stack-processing path.
+
+        if image_data.ndim == 2:
+            data_mode = '2d'
+
+
+
         is_valid, unique_values = self.validate_binary_image(image_data)
 
         self.current_image_data = image_data
+        # print(f"Loaded image shape: {image_data.shape}")
         self.current_slice_index = 0
         self.current_time_index = 0
         self.data_mode = data_mode
