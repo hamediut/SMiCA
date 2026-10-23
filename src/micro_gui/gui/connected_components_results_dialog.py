@@ -4,8 +4,9 @@ Results dialog for connected-components output: one row per component.
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QAbstractItemView, QPushButton, QFileDialog, QMessageBox
+    QAbstractItemView, QPushButton, QFileDialog, QMessageBox, QMenu, QCheckBox
 )
+from PySide6.QtCore import Qt, Signal, QItemSelection, QItemSelectionModel
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
 
@@ -52,6 +53,13 @@ class ConnectedComponentsResultsDialog(QDialog):
     Not modal (shown with .show(), not .exec()) so the user can keep it open
     while comparing against the image or running another calculation.
     """
+
+    # The dialog doesn't own the label volume - ImageViewer does. It reports
+    # intent and lets the viewer act on it.
+
+    preview_requested = Signal(object) # set of labels to hide, live preview
+    changes_committed = Signal(object) # set of deleted labels, on OK
+    changes_reverted = Signal()        # on Cancel / window close
 
     # Column -> unit exponent, for measurements that carry a physical unit
     # (1 = length, -1 = 1/length). A column absent from this dict is treated as
@@ -102,6 +110,13 @@ class ConnectedComponentsResultsDialog(QDialog):
         #for plotting histogram of the measure column
         self.selected_column_index = None
 
+        # Deletions are tracked as a set of label ids, not a copy of the label
+        # volume - that array is hundreds of MB on a 512^3 dataset, and this
+        # makes revert free.
+
+        self.deleted_labels = set()
+        self._committed = False # closeEvent uses this to decide revert vs keep
+
         self.setWindowTitle("Connected Components Results")
         self.setMinimumWidth(700)
         self._setup_ui(total_components, count_label, measure_label)
@@ -150,6 +165,11 @@ class ConnectedComponentsResultsDialog(QDialog):
         table.horizontalHeader().setStretchLastSection(True) # last column fills leftover width
         table.verticalHeader().setVisible(False)               # no numbered row headers needed
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # read-only results, not an editable grid
+        # options for enabling selection...
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection) # ctrl/shift multi-select
+        table.setContextMenuPolicy(Qt.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_context_menu)
 
         # itertuples() is faster than iterrows() for looping a DataFrame;
         # ._asdict() turns each row into a plain dict so columns can be
@@ -175,7 +195,7 @@ class ConnectedComponentsResultsDialog(QDialog):
         self.table = table
         layout.addWidget(table)
 
-        # Save/Close buttons, right-aligned via the stretch placed before them.
+        # Preview / Histogram / Save / OK / Cancel, right-aligned via the stretch.
         button_layout = QHBoxLayout()
 
         self.histogram_button = QPushButton("Histogram")
@@ -187,13 +207,35 @@ class ConnectedComponentsResultsDialog(QDialog):
         save_button = QPushButton("Save to CSV...")
         save_button.clicked.connect(self._export_csv)
 
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(self.close)
+        # Same QCheckBox pattern as cc_color_checkbox in image_viewer - create,
+        # set default state, connect its toggled signal to a handler.
 
+        self.preview_checkbox = QCheckBox("Preview")
+        self.preview_checkbox.setChecked(True)
+        self.preview_checkbox.setToolTip(
+            "Update the colored view as you delete components. Changes are only "
+            "kept when you click OK."
+        )
+        self.preview_checkbox.toggled.connect(self._emit_preview)
+
+        # Same QPushButton + clicked.connect pattern as save_button above.
+        ok_button = QPushButton("OK")
+        ok_button.setToolTip("Keep the deletions and close.")
+        ok_button.clicked.connect(self._accept_changes)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.setToolTip("Discard the deletions and close.")
+        cancel_button.clicked.connect(self.close)   # closeEvent does the actual revert
+
+        # Order here is left-to-right on screen. addStretch() pushes everything
+        # after it to the right, so Preview sits alone on the left.
+        button_layout.addWidget(self.preview_checkbox)
         button_layout.addStretch()
         button_layout.addWidget(self.histogram_button)
         button_layout.addWidget(save_button)
-        button_layout.addWidget(close_button)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+
         layout.addLayout(button_layout)
 
     def _on_header_clicked(self, column_index):
@@ -201,10 +243,97 @@ class ConnectedComponentsResultsDialog(QDialog):
             """Select a column by clicking its header - highlights it and enables the Histogram button."""
 
             self.selected_column_index = column_index
-            self.table.selectColumn(column_index)
             self.histogram_button.setEnabled(True)
             self.histogram_button.setText(f"Histogram: {self.headers[column_index]}")
 
+
+    def _selected_labels(self):
+        """Component labels for the currently selected rows.
+
+        Reads the label out of column 0's stored value rather than indexing
+        table_data by row - once the table has been sorted, widget row order
+        no longer matches the DataFrame's.
+        """
+        rows = {index.row() for index in self.table.selectedIndexes()}
+        return sorted(int(self.table.item(row, 0).value) for row in rows)
+
+    def _show_context_menu(self, position):
+        """Right-click menu for the selected rows."""
+
+        menu = QMenu(self)
+
+        # Same addAction + triggered.connect pattern as the File menu actions
+        # in image_viewer.
+
+        invert_action = menu.addAction("Invert Selection")
+        invert_action.triggered.connect(self._invert_selection)
+
+        delete_action = menu.addAction("Delete Selected Components")
+        delete_action.setEnabled(bool(self._selected_labels())) # greyed out if nothing selected
+        delete_action.triggered.connect(self._delete_selected)
+
+        # position is in viewport coordinates; exec wants global ones
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def _invert_selection(self):
+        """Flip which rows are selected - a Toggle over every row does exactly that."""
+
+        #Get the table's model
+        model = self.table.model()
+        #Create a selection covering the entire table
+        everything = QItemSelection(
+            model.index(0, 0),
+            model.index(self.table.rowCount() - 1, self.table.columnCount() - 1),
+            #(top_left_index, bottom_right_index)
+        )
+
+        # selectionModel() tracks which cells or rows are selected
+        #QItemSelectionModel.Toggle -> reverse the selection state
+        #QItemSelectionModel.Rows -> select entire rows, not individual cells
+        self.table.selectionModel().select(
+            everything, QItemSelectionModel.Toggle | QItemSelectionModel.Rows
+        )
+
+    def _delete_selected(self):
+        """Drop the selected components from the table and the preview.
+
+        Rows come out of the widget AND out of table_data, so the CSV export
+        and histogram stay consistent with what's on screen. The label volume
+        is untouched until OK.
+        """
+
+        labels = self._selected_labels()
+        if not labels:
+            return  # shouldn't happen - menu item is disabled if nothing selected
+
+        self.deleted_labels.update(labels)
+        # drop the rows from the DataFrame, reindex 0..N-1
+        self.table_data = self.table_data[~self.table_data['label'].isin(labels)].reset_index(drop=True)
+
+        # Remove bottom-up so the earlier row indices stay valid as rows go away.
+        rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            self.table.removeRow(row)
+
+        self._emit_preview()
+
+    def _emit_preview(self):
+        """Show the deletions in the colored view, or clear the preview if the
+        checkbox is off."""
+        self.preview_requested.emit(self.deleted_labels if self.preview_checkbox.isChecked() else set())
+
+    def _accept_changes(self):
+        # print("DEBUG: _accept_changes, deleting:", self.deleted_labels)   # temp
+        self._committed = True
+        self.changes_committed.emit(self.deleted_labels)
+        self.close()
+        
+    def closeEvent(self, event):
+        """Cancel and the window's X both land here - revert unless OK already
+        committed."""
+        if not self._committed:
+            self.changes_reverted.emit()
+        super().closeEvent(event)
 
     def _show_histogram(self):
 

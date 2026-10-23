@@ -723,6 +723,10 @@ class ImageViewer(QMainWindow):
         #connected coponents results
         self.cc_labels_data: Optional[np.ndarray] = None # label volume from the last connected-components run
         self.cc_result: Optional[dict] = None # dict from connected_components_2d/_3d() with all the measurements
+        # Labels currently shown in the colored view - the min-size filter sets
+        # this, and deletions in the results dialog subtract from it.
+        self._cc_visible_labels: set = set()
+        
         self.cc_color_lut: Optional[np.ndarray] = None # (n_labels+1, 3) uint8 - label id -> RGB color
         self.show_cc_colors: bool = False # is the checkbox currently on?
 
@@ -1115,6 +1119,7 @@ class ImageViewer(QMainWindow):
         # doesn't linger and get wrongly displayed over unrelated new data.
         self.cc_result = None
         self.cc_labels_data = None
+        self._cc_visible_labels = set()
         self.cc_color_lut = None
         self.show_cc_colors = False
         self.cc_color_checkbox.setChecked(False)
@@ -1510,6 +1515,9 @@ class ImageViewer(QMainWindow):
         """Handle completion of the measurement step - filter by min size, keep only
         the selected measurement columns, refresh the colored view, and show results."""
 
+        # print("DEBUG measurements finished: merged_table rows:", len(merged_table),
+        #       "| cc_result table rows:", len(self.cc_result['table']))
+        
         self.progress_bar.setVisible(False)
 
         count_col = 'voxel_count' if self._cc_is_3d else 'pixel_count'
@@ -1519,31 +1527,135 @@ class ImageViewer(QMainWindow):
         filtered_table = merged_table[merged_table[count_col] >= self._measurements_min_size].reset_index(drop=True)
         display_table = filtered_table[['label', count_col, measure_col] + self._measurements_selected]
 
-        # Refresh the colored view to match what the table now reports - same
-        # LUT-masking trick used before, just living here now instead of the CC
-        # step, since min_size didn't exist yet at that point.
-        labels = self.cc_result['labels']
-        keep = np.zeros(int(labels.max()) + 1, dtype=bool)
-        keep[filtered_table['label'].to_numpy()] = True
-        labels_for_display = np.where(keep[labels], labels, 0)
+        # The min-size filter sets the baseline set of visible components;
+        # deletions in the results dialog subtract from it.
+        self._cc_visible_labels = set(filtered_table['label'].to_numpy().tolist())
 
-        self.cc_labels_data = labels_for_display
-        n_labels = int(labels_for_display.max())
+        # LUT is built over EVERY label, not just the visible ones - that way
+        # deleting a component leaves every survivor's colour unchanged instead
+        # of reshuffling the whole palette on each edit.
+
+        labels = self.cc_result['labels']
+        n_labels = int(labels.max())
         rng = np.random.default_rng(0)
         colors = (rng.random((n_labels + 1, 3)) * 255).astype(np.uint8)
         colors[0] = 0
         self.cc_color_lut = colors
+
         self.show_cc_colors = True
         self.cc_color_checkbox.setChecked(True)
-        self.display_current_slice()
+        self._refresh_cc_display()   # replaces the inline masking + display_current_slice()
 
         # Show the results table in a new dialog
         result_window = ConnectedComponentsResultsDialog(
             display_table, self._measurements_unit, self._cc_is_3d, total_components, self
         )
 
+        # Same signal/slot wiring as the calculation threads above - the dialog
+        # reports what the user wants, the viewer owns the label volume and acts.
+        result_window.preview_requested.connect(self._refresh_cc_display)
+        result_window.changes_committed.connect(self.on_cc_changes_committed)
+        result_window.changes_reverted.connect(self._refresh_cc_display)
+        
         result_window.show()
         self.status_bar.showMessage(f"Measurements: {total_components} components found - {len(display_table)} shown")
+
+    def _refresh_cc_display(self, hidden_labels=frozenset()):
+        """Rebuild the colored slice from the visible components, minus whatever
+        the results dialog is currently hiding.
+
+        Only cc_labels_data changes - the colour LUT covers every label, so
+        surviving components keep the same colour across edits instead of the
+        whole palette reshuffling each time something is deleted.
+
+        _refresh_cc_display takes a default of frozenset() because it gets 
+        connected to two different signals — 
+        preview_requested passes a set of labels to hide,
+          while changes_reverted passes nothing at all. Revert is just "refresh with nothing hidden."
+
+        """
+        if self.cc_result is None:
+            return
+
+    
+        labels = self.cc_result['labels']
+        # visible = allowed labels - temporarily hidden labels.
+        visible = self._cc_visible_labels - set(hidden_labels or ())
+
+        # Same LUT-masking trick already used in on_measurements_finished:
+        # build a boolean lookup indexed by label id, then index the whole
+        # volume through it in one vectorised pass.
+        max_label = int(labels.max())
+        keep = np.zeros(max_label + 1, dtype=bool)
+        # If there are any components to display, mark their
+        # positions in the lookup table as True. Ignore any id beyond the
+        # volume's current max - that only happens if the visible set has
+        # drifted out of sync, and a missing colour beats an IndexError that
+        # takes the window down.
+        visible = {label for label in visible if label <= max_label}
+        if visible:
+            keep[np.fromiter(visible, dtype=int)] = True
+
+        # Importantly, surviving components retain their original
+        # label IDs, so their assigned colors remain unchanged.
+        self.cc_labels_data = np.where(keep[labels], labels, 0)
+        # Redraw the current slice using the updated labeled data.
+        self.display_current_slice()
+
+    def on_cc_changes_committed(self, deleted_labels):
+        """
+        Permanently delete selected connected components from the label volume.
+
+        This function is called when the user confirms deletions by clicking
+        OK in the results dialog.
+
+        Deleted components are replaced with background (label 0), so they
+        will not reappear if measurements are performed again.
+        """
+
+        # print("DEBUG commit: deleting", len(deleted_labels), "labels")
+        # print("  BEFORE  table rows:", len(self.cc_result['table']),
+        #       "| image fg:", int(self.current_image_data.sum()),
+        #       "| num_components:", self.cc_result['num_components'])      # temp
+        
+        if self.cc_result is None:
+            return
+
+        # Keep exactly what the dialog was showing, minus whatever was deleted.
+        # Components hidden by the min-size filter were never visible and the
+        # preview already showed them gone, so OK means "make the volume match
+        # what I'm looking at" - otherwise they survive in cc_result and come
+        # straight back on the next Measurements run.
+
+        keep_labels = self._cc_visible_labels - set(deleted_labels)
+
+        labels = self.cc_result['labels']
+        keep = np.zeros(int(labels.max()) + 1, dtype=bool)
+        if keep_labels:
+            keep[np.fromiter(keep_labels, dtype=int)] = True
+
+        self.cc_result['labels'] = np.where(keep[labels], labels, 0)
+        self.cc_result['table'] = self.cc_result['table'][
+            self.cc_result['table']['label'].isin(keep_labels)
+        ].reset_index(drop=True)
+        self.cc_result['num_components'] = len(keep_labels)
+        self._cc_visible_labels = keep_labels
+
+        # The surviving components become the new working image, so Minkowski,
+        # SMDs, REV and a fresh Connected Components run all see what's left.
+        self.current_image_data = (self.cc_result['labels'] > 0).astype(np.uint8)
+        self._display_min = float(self.current_image_data.min())
+        self._display_max = float(self.current_image_data.max())
+
+        self._refresh_cc_display()
+        self.status_bar.showMessage(
+            f"Kept {len(keep_labels)} component(s) - image updated"
+        )
+        
+        
+        # print("  AFTER   table rows:", len(self.cc_result['table']),
+        #       "| image fg:", int(self.current_image_data.sum()),
+        #       "| num_components:", self.cc_result['num_components'])
 
     def on_measurements_error(self, error_msg: str):
         """Handle error during the measurement step."""
