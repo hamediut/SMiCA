@@ -130,8 +130,10 @@ class ConnectedComponentsResultsDialog(QDialog):
         # "5902 components found - 2746 shown below".
 
         shown = len(self.table_data)
-        summary = QLabel(f"{total_components} components found - {shown} shown after filtering below")
-        layout.addWidget(summary)
+        self.total_components = total_components
+        self.summary = QLabel()
+        self._update_summary()
+        layout.addWidget(self.summary)
 
         # Show every column actually present in the table, not just label/count/measure -
         # this way, checking/unchecking measurements in MeasurementsSettingsDialog just
@@ -315,7 +317,17 @@ class ConnectedComponentsResultsDialog(QDialog):
         for row in rows:
             self.table.removeRow(row)
 
+        self._update_summary()
         self._emit_preview()
+
+    def _update_summary(self):
+        """Header line above the table - recomputed after deletions so the
+        counts match what's actually listed."""
+        text = f"{self.total_components} components found - {len(self.table_data)} shown"
+        if self.deleted_labels:
+            text += f" ({len(self.deleted_labels)} deleted - click OK to keep)"
+        self.summary.setText(text)
+
 
     def _emit_preview(self):
         """Show the deletions in the colored view, or clear the preview if the

@@ -172,7 +172,7 @@ def _safe_prop(region, name):
         return np.nan
 
 
-def compute_shape_measurements(labels: np.ndarray, is_3d: bool, res: float = 1.0)-> pd.DataFrame:
+def compute_shape_measurements(labels: np.ndarray, is_3d: bool, res: float = 1.0, only_labels= None)-> pd.DataFrame:
     """Compute per-component shape measurements available directly from
     skimage's regionprops - no custom surface reconstruction or eigenvector
     math involved. Surface area, sphericity, elongation/flatness, and
@@ -183,6 +183,7 @@ def compute_shape_measurements(labels: np.ndarray, is_3d: bool, res: float = 1.0
         is_3d: whether `labels` is a 3D volume or a 2D image.
         res: pixel/voxel size (physical units), same convention as
             connected_components_2d/_3d's `res`.
+        only_labels: if given, only these component labels are measured; others are skipped.
 
     Returns:
         pandas DataFrame, one row per component (background excluded), meant
@@ -191,6 +192,10 @@ def compute_shape_measurements(labels: np.ndarray, is_3d: bool, res: float = 1.0
 
     rows = []
     for region in regionprops(labels):
+        # regionprops computes properties lazily, so skipping here costs
+        # almost nothing - nothing is measured until a property is read.
+        if only_labels is not None and region.label not in only_labels:
+            continue
         row = {'label': region.label}
         row['equivalent_diameter'] = _safe_prop(region, 'equivalent_diameter') * res
 
@@ -246,8 +251,9 @@ def _safe_mesh_area_and_volume(region):
         return np.nan, np.nan
 
 def _safe_axes_and_orientation(region):
-    """Major/intermediate/minor axis lengths and the major axis's direction
-    (theta/phi), from the inertia tensor's eigenvalues/eigenvectors.
+    """Major/intermediate/minor axis lengths, plus the major axis's
+    inclination and azimuth, from the inertia tensor's eigenvalues and
+    eigenvectors.
 
     Length formula: for a uniform-density ellipsoid, eigenvalue_i = (sum of
     the OTHER two semi-axes squared) / 5, which inverts to
@@ -257,11 +263,15 @@ def _safe_axes_and_orientation(region):
 
     Orientation: the eigenvector of the SMALLEST eigenvalue points along the
     major (longest) axis - verified against ellipsoids individually
-    elongated along each array axis. theta = angle from array axis 0, phi =
-    angle from array axis 2 in the axis2/axis1 plane, matching the
-    Avizo/Dragonfly convention for reporting an axis's direction. An axis has
-    no inherent direction, so the sign is fixed by convention (axis-0
-    component >= 0).
+    elongated along each array axis. Inclination is its angle from array
+    axis 0 (Z): 0-90, where 0 = along Z and 90 = in the slice plane. Azimuth
+    is the direction of its in-plane projection measured from array axis 2
+    (X): 0-180. An axis has no inherent direction, so the sign is fixed by
+    convention (axis-0 component >= 0) and azimuth is folded into [0, 180).
+
+    Returns:
+        (major_length, intermediate_length, minor_length, inclination_deg,
+        azimuth_deg) - all NaN if the eigendecomposition fails.
     """
 
     #For a component, the inertia tensor is a 3×3 matrix that describes how its voxels are spread out around its own centroid
@@ -283,10 +293,10 @@ def _safe_axes_and_orientation(region):
 
     major_vec = eigvecs[:, 0]  # smallest eigenvalue -> major axis direction
     #  small moment → long axis, large moment → short axis
-    # eigvecs[:, 0] isn't just a number — it's the actual 3D direction the major axis points in,
-    # paired with that smallest eigenvalue. We convert that direction into two angles (theta, phi)
-    # the same way you'd describe any line's orientation in 3D — like latitude/longitude, or dip/azimuth in geology:
-    #  theta = angle away from array axis 0, phi = angle around that axis, measured in the axis-2/axis-1 plane.
+    # eigvecs[:, 0] isn't just a number - it's the actual 3D direction the major axis points in,
+    # paired with that smallest eigenvalue. Below it's converted into two angles, the same way
+    # you'd describe any line's orientation in 3D: inclination = angle from array axis 0 (Z),
+    # azimuth = direction of its projection into the slice plane, measured from array axis 2 (X).
     v0, v1, v2 = major_vec
     if v0 < 0:
         v0, v1, v2 = -v0, -v1, -v2
@@ -323,7 +333,7 @@ ADVANCED_MEASUREMENTS = frozenset({
 
 
 
-def compute_advanced_shape_measurements(labels: np.ndarray, res: float, requested: list) -> pd.DataFrame:
+def compute_advanced_shape_measurements(labels: np.ndarray, res: float, requested: list, only_labels = None) -> pd.DataFrame:
     """Compute the remaining per-component 3D shape/orientation measurements:
     surface_area, specific_surface_area, sphericity (need a per-component
     marching-cubes mesh), and elongation, flatness, inclination_deg, azimuth_deg
@@ -340,6 +350,7 @@ def compute_advanced_shape_measurements(labels: np.ndarray, res: float, requeste
         requested: which columns to compute - any of 'surface_area',
             'specific_surface_area', 'sphericity', 'elongation', 'flatness',
             'inclination_deg', 'azimuth_deg'.
+        only_labels: if given, only these component labels are measured; others are skipped.
 
     Returns:
         pandas DataFrame, one row per component (background excluded), with
@@ -367,6 +378,8 @@ def compute_advanced_shape_measurements(labels: np.ndarray, res: float, requeste
 
     rows = []
     for region in regionprops(labels):
+        if only_labels is not None and region.label not in only_labels:
+            continue
         row = {'label': region.label}
 
         if need_surface:

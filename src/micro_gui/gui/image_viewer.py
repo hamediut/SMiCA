@@ -484,12 +484,13 @@ class MeasurementsThread(QThread):
     finished = Signal(object) # Emits the merged, rescaled pandas DataFrame
     error = Signal(str)
 
-    def __init__(self, cc_result: dict, is_3d: bool, resolution: float, selected_measurements: List):
+    def __init__(self, cc_result: dict, is_3d: bool, resolution: float, selected_measurements: List, min_size: int = 0):
         super().__init__()
         self.cc_result = cc_result
         self.is_3d = is_3d
         self.resolution = resolution
         self.selected_measurements = selected_measurements
+        self.min_size = min_size
 
     def run(self):
         try:
@@ -501,9 +502,13 @@ class MeasurementsThread(QThread):
             # The Connected Components step ran with res=1.0 (raw units) -
             # rescale the measure column now with the real voxel/pixel size.
             table[measure_col] = table[count_col] * (self.resolution ** size_exponent)
-
+            
+            # Apply the min-size filter BEFORE measuring - otherwise every
+            # sub-threshold component is measured and then thrown away.
+            table = table[table[count_col] >= self.min_size].reset_index(drop=True)
+            kept = set(table['label'].to_numpy().tolist())
             shape_table = compute_shape_measurements(
-                self.cc_result['labels'], self.is_3d, res=self.resolution
+                self.cc_result['labels'], self.is_3d, res=self.resolution, only_labels=kept
                 )
 
             merged_table = table.merge(shape_table, on='label', how='left')
@@ -516,7 +521,8 @@ class MeasurementsThread(QThread):
 
             if self.is_3d and requested_advanced:
                 advanced_table = compute_advanced_shape_measurements(
-                    self.cc_result['labels'], res=self.resolution, requested = requested_advanced
+                    self.cc_result['labels'], res=self.resolution, requested = requested_advanced,
+                    only_labels=kept
                     )
                 merged_table = merged_table.merge(advanced_table, on='label', how='left')
 
@@ -731,6 +737,11 @@ class ImageViewer(QMainWindow):
         # Labels currently shown in the colored view - the min-size filter sets
         # this, and deletions in the results dialog subtract from it.
         self._cc_visible_labels: set = set()
+
+        # The results dialog currently open, if any. It's non-modal and stays
+        # wired to this viewer, so it must be closed whenever the labelling it
+        # describes is replaced - otherwise OK on it commits stale label ids.
+        self._cc_results_window = None
         
         self.cc_color_lut: Optional[np.ndarray] = None # (n_labels+1, 3) uint8 - label id -> RGB color
         self.show_cc_colors: bool = False # is the checkbox currently on?
@@ -1072,6 +1083,45 @@ class ImageViewer(QMainWindow):
         self.show_cc_colors = bool(state)
         self.display_current_slice()
 
+    def _close_cc_results_window(self):
+        """Close the open results dialog, if any, without letting it act.
+
+        blockSignals() rather than disconnect(): closing the dialog normally
+        emits changes_reverted, and PySide6's disconnect() warns when nothing
+        is connected and raises on an already-deleted dialog.
+        """
+        window = self._cc_results_window
+        self._cc_results_window = None
+        if window is None:
+            return
+        try:
+            window.blockSignals(True)
+            window.close()
+            window.deleteLater() # it's parented to the viewer, so free it now rather than at exit
+        except RuntimeError:
+            pass # already deleted, nothing to do
+
+    def _reset_cc_state(self):
+
+        """Forget the current connected-components result.
+
+        Call this whenever the image or its labelling is replaced - a new
+        image, Binarize, or a fresh Connected Components run. Every piece of
+        CC state describes one labelling of one image, so none of it is valid
+        afterwards.
+        """
+        self._close_cc_results_window()
+        self.cc_result = None
+        self.cc_labels_data = None
+        self._cc_visible_labels = set()
+        self.cc_color_lut = None
+        self.show_cc_colors = False
+        self.cc_color_checkbox.setChecked(False)
+        self.cc_color_checkbox.setVisible(False)
+
+
+
+
 
     def open_image(self):
         """Open a file dialog to select a TIF image and display it."""
@@ -1146,13 +1196,7 @@ class ImageViewer(QMainWindow):
 
         # A connected-components result belongs to the OLD image - reset it here so it
         # doesn't linger and get wrongly displayed over unrelated new data.
-        self.cc_result = None
-        self.cc_labels_data = None
-        self._cc_visible_labels = set()
-        self.cc_color_lut = None
-        self.show_cc_colors = False
-        self.cc_color_checkbox.setChecked(False)
-        self.cc_color_checkbox.setVisible(False)
+        self._reset_cc_state()
 
 
         # Computed ONCE for the whole volume (not per-slice) so display_current_slice() can
@@ -1337,6 +1381,10 @@ class ImageViewer(QMainWindow):
         self._display_min = float(self.current_image_data.min())
         self._display_max = float(self.current_image_data.max())
 
+        # The previous labelling (and any open results dialog) describes the
+        # image as it was before binarizing - e.g. the other phase.
+        self._reset_cc_state()
+
         # Re-display (same slice index as before, now showing the binarized result)
         self.display_current_slice()
 
@@ -1477,6 +1525,11 @@ class ImageViewer(QMainWindow):
         dialog = ConnectedComponentsSettingsDialog(is_3d=is_3d, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return # user cancelled
+        
+        # Relabelling invalidates the previous result, and any results dialog
+        # still open for it - OK on that dialog would commit label ids from
+        # the old labelling against the new one.
+        self._reset_cc_state()
 
         self._cc_is_3d = is_3d # stashed for open_measurements_dialog's is_3d branching later
 
@@ -1571,12 +1624,20 @@ class ImageViewer(QMainWindow):
         self._measurements_min_size = dialog.get_min_size()
         self._measurements_selected = dialog.get_selected_measurements()
 
+        # A results dialog from the previous run would keep acting on state
+        # this run is about to rebuild. Close it before the thread starts, so
+        # OK on it can't race the new run, then refresh to drop any deletions
+        # it was previewing but never committed.
+        self._close_cc_results_window()
+        self._refresh_cc_display()
+
         self.progress_bar.setVisible(True)
         self.status_bar.showMessage("Computing measurements...")
         QApplication.processEvents()
 
         self.measurements_thread = MeasurementsThread(
-            self.cc_result, self._cc_is_3d, dialog.get_resolution(), self._measurements_selected)
+            self.cc_result, self._cc_is_3d, dialog.get_resolution(), self._measurements_selected,
+            min_size=self._measurements_min_size)
         self.measurements_thread.finished.connect(self.on_measurements_finished)
         self.measurements_thread.error.connect(self.on_measurements_error)
         self.measurements_thread.start()
@@ -1626,7 +1687,11 @@ class ImageViewer(QMainWindow):
         result_window.preview_requested.connect(self._refresh_cc_display)
         result_window.changes_committed.connect(self.on_cc_changes_committed)
         result_window.changes_reverted.connect(self._refresh_cc_display)
-        
+
+        # Kept so the dialog can be closed whenever the labelling it shows is
+        # replaced - see _close_cc_results_window.
+        self._cc_results_window = result_window
+
         result_window.show()
         self.status_bar.showMessage(f"Measurements: {total_components} components found - {len(display_table)} shown")
 
