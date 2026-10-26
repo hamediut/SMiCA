@@ -13,6 +13,7 @@ tqdm>=4.65.0
 # Image Processing
 Pillow>=10.0.0
 tifffile>=2023.7.10
+scikit-image>=0.21.0
 
 # Visualization
 matplotlib>=3.7.0

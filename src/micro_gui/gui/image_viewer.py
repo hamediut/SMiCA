@@ -9,7 +9,7 @@ from typing import Optional, List
 
 from PySide6.QtWidgets import (
     QMainWindow, QLabel, QFileDialog, QScrollArea, QStatusBar, QDialog,
-    QSlider, QVBoxLayout, QWidget, QMessageBox, QProgressBar, QApplication
+    QSlider, QVBoxLayout, QWidget, QMessageBox, QProgressBar, QApplication, QCheckBox
 )
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtCore import Qt, QThread, Signal
@@ -55,7 +55,15 @@ from .minkowski_evolution_plot_window import MinkowskiEvolutionPlotWindow
 
 from ..utils.image_utils import load_multipage_tif
 
+#connected components
+from ..analysis.connected_components import (
+    connected_components_2d, connected_components_3d, connected_components_2d_stack,
+    compute_shape_measurements, compute_advanced_shape_measurements, ADVANCED_MEASUREMENTS,
+)
 
+from .connected_components_results_dialog import ConnectedComponentsResultsDialog
+from .measurements_settings_dialog import MeasurementsSettingsDialog
+from .connected_components_settings_dialog import ConnectedComponentsSettingsDialog
 ## caclulation threads for background processing, so GUI remains responsive
 
 class REVCalculationThread(QThread):
@@ -431,6 +439,99 @@ class MinkowskiEvolutionStreamingThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+class ConnectedComponentsThread(QThread):
+    """
+    Thread for running connected-components labeling in the background -
+    label() on a full-size volume takes a few seconds, long enough to
+    freeze the UI if run directly on the GUI thread.
+
+    Runs with res=1.0 (raw voxel/pixel units) - real voxel size isn't known
+    yet at this step. It's asked for later in MeasurementsSettingsDialog and
+    applied by MeasurementsThread once labeling is done.
+    """
+    finished = Signal(object) # Emits the dict connected_components_2d/_3d returns
+    error = Signal(str)
+
+    def __init__(self, image_data:np.ndarray, connectivity:int, is_3d: bool, per_frame: bool = False):
+        super().__init__()
+
+        self.image_data = image_data
+        self.connectivity = connectivity
+        self.is_3d = is_3d
+        self.per_frame = per_frame # 2D time series: label each frame on its own
+
+    def run(self):
+        try:
+            if self.per_frame:
+                compute  = connected_components_2d_stack
+            else:
+                compute = connected_components_3d if self.is_3d else connected_components_2d
+
+            result = compute(self.image_data, connectivity=self.connectivity, res= 1.0)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class MeasurementsThread(QThread):
+    """
+    Thread for running the measurement step on an already-labeled connected-
+    components result: rescales the raw count into physical volume/area now
+    that the real voxel size is known, and computes the requested shape
+    measurements. regionprops per component is fast, but still worth keeping
+    off the GUI thread for large component counts.
+    """
+
+    finished = Signal(object) # Emits the merged, rescaled pandas DataFrame
+    error = Signal(str)
+
+    def __init__(self, cc_result: dict, is_3d: bool, resolution: float, selected_measurements: List, min_size: int = 0):
+        super().__init__()
+        self.cc_result = cc_result
+        self.is_3d = is_3d
+        self.resolution = resolution
+        self.selected_measurements = selected_measurements
+        self.min_size = min_size
+
+    def run(self):
+        try:
+            table = self.cc_result['table'].copy()
+            count_col = 'voxel_count' if self.is_3d else 'pixel_count'
+            measure_col = 'volume' if self.is_3d else 'area'
+            size_exponent = 3 if self.is_3d else 2
+
+            # The Connected Components step ran with res=1.0 (raw units) -
+            # rescale the measure column now with the real voxel/pixel size.
+            table[measure_col] = table[count_col] * (self.resolution ** size_exponent)
+            
+            # Apply the min-size filter BEFORE measuring - otherwise every
+            # sub-threshold component is measured and then thrown away.
+            table = table[table[count_col] >= self.min_size].reset_index(drop=True)
+            kept = set(table['label'].to_numpy().tolist())
+            shape_table = compute_shape_measurements(
+                self.cc_result['labels'], self.is_3d, res=self.resolution, only_labels=kept
+                )
+
+            merged_table = table.merge(shape_table, on='label', how='left')
+
+            # Only run the expensive pass if something from it was actually ticked.
+            # Unlike the cheap measurements above, these cost real time, so the
+            # checkboxes gate the computation itself, not just what gets displayed.
+
+            requested_advanced = [m for m in self.selected_measurements if m in ADVANCED_MEASUREMENTS]
+
+            if self.is_3d and requested_advanced:
+                advanced_table = compute_advanced_shape_measurements(
+                    self.cc_result['labels'], res=self.resolution, requested = requested_advanced,
+                    only_labels=kept
+                    )
+                merged_table = merged_table.merge(advanced_table, on='label', how='left')
+
+            self.finished.emit(merged_table)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 
 class SliceEvolutionThread(QThread):
     """
@@ -630,6 +731,21 @@ class ImageViewer(QMainWindow):
         # Real step/time numbers per slice, from a folder import's filenames (e.g. [0, 5, 12, 20]).
         # None for anything without associated filenames (opened tif, native 3D volume).
         self.stack_labels: Optional[list] = None
+        #connected coponents results
+        self.cc_labels_data: Optional[np.ndarray] = None # label volume from the last connected-components run
+        self.cc_result: Optional[dict] = None # dict from connected_components_2d/_3d() with all the measurements
+        # Labels currently shown in the colored view - the min-size filter sets
+        # this, and deletions in the results dialog subtract from it.
+        self._cc_visible_labels: set = set()
+
+        # The results dialog currently open, if any. It's non-modal and stays
+        # wired to this viewer, so it must be closed whenever the labelling it
+        # describes is replaced - otherwise OK on it commits stale label ids.
+        self._cc_results_window = None
+        
+        self.cc_color_lut: Optional[np.ndarray] = None # (n_labels+1, 3) uint8 - label id -> RGB color
+        self.show_cc_colors: bool = False # is the checkbox currently on?
+
         self.current_file_path: Optional[str] = None
         self.current_slice_index: int = 0
         self.current_time_index: int = 0 # which 3D volume (T axis) is showing, 4D data only
@@ -677,8 +793,6 @@ class ImageViewer(QMainWindow):
         self.time_label.setVisible(False)
         self.layout.addWidget(self.time_label)
 
-
-
         # Create slider for 3D images (initially hidden)
         self.slice_slider = QSlider(Qt.Orientation.Horizontal)
         self.slice_slider.setMinimum(0)
@@ -694,6 +808,13 @@ class ImageViewer(QMainWindow):
         self.slice_label.setVisible(False)
         self.layout.addWidget(self.slice_label)
 
+        # Toggle for showing connected-components colors instead of the raw grayscale
+        # slice - hidden until a connected-components calculation has actually run.
+        self.cc_color_checkbox = QCheckBox("Show Connected Components Colors")
+        self.cc_color_checkbox.setVisible(False)
+        self.cc_color_checkbox.stateChanged.connect(self.on_cc_color_toggle)
+        self.layout.addWidget(self.cc_color_checkbox)
+
         # Store current pixmap
         self.current_pixmap: Optional[QPixmap] = None
 
@@ -704,7 +825,7 @@ class ImageViewer(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("&File")
 
-        open_action = file_menu.addAction("&Open Single 2D/3D Image")
+        open_action = file_menu.addAction("&Import Single 2D/3D Image")
         open_action.setShortcut("Ctrl+O")
         open_action.setStatusTip("Open a single 2D or 3D TIF image file")
         open_action.triggered.connect(self.open_image)
@@ -780,6 +901,23 @@ class ImageViewer(QMainWindow):
             "mean curvature, Euler characteristic) from the current image"
         )
         minkowski_action.triggered.connect(self.open_minkowski_dialog)
+
+        # connected components
+        cc_action = image_analysis_menu.addAction("Calculate &Connected Components...")
+        cc_action.setStatusTip(
+            "Label connected components of the foreground phase and measure each "
+            "one's size (2D area or 3D volume)."
+        )
+        cc_action.triggered.connect(self.open_connected_components_dialog)
+
+        # measurements
+        measurements_action = image_analysis_menu.addAction("Calculate &Measurements...")
+        measurements_action.setStatusTip(
+            "Compute shape measurements for the components found by the last "
+            "Connected Components run."
+        )
+        measurements_action.triggered.connect(self.open_measurements_dialog)
+
 
     def _create_status_bar(self):
         """Create the status bar with progress indicator."""
@@ -864,6 +1002,20 @@ class ImageViewer(QMainWindow):
 
         return QPixmap.fromImage(q_image)
 
+    def labels_to_qpixmap(self, rgb_image: np.ndarray)->QPixmap:
+
+        """
+        Convert an (H, W, 3) uint8 RGB array into a QPixmap - same idea as
+        numpy_to_qpixmap but for an already-colored image (Format_RGB888
+        instead of Format_Grayscale8), used for the connected-components color overlay.
+        """
+
+        height, width, _ = rgb_image.shape
+        bytes_per_line = width * 3
+        q_image = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+
+        return QPixmap.fromImage(q_image)
+
     def display_current_slice(self):
         """Display the current slice of the image."""
         if self.current_image_data is None:
@@ -883,7 +1035,24 @@ class ImageViewer(QMainWindow):
         # Convert to pixmap and display - pass the WHOLE volume's min/max (not just this
         # slice's) so a uniform slice (e.g. all-background) still renders correctly instead
         # of falling back to flat grey (see numpy_to_qpixmap's docstring).
-        self.current_pixmap = self.numpy_to_qpixmap(current_2d, self._display_min, self._display_max)
+        # self.current_pixmap = self.numpy_to_qpixmap(current_2d, self._display_min, self._display_max)
+
+        # Connected-components colors replace the grayscale slice entirely when the
+        # checkbox is on - cc_labels_data is either a full 3D label volume (index by
+        # current_slice_index, same as current_2d above) or a single 2D label image
+        # (used directly, same as current_2d's own ndim==2 fallback above).
+        if self.show_cc_colors and self.cc_labels_data is not None:
+            if self.current_image_data.ndim == 3:
+                label_slice = self.cc_labels_data[self.current_slice_index, :, :]
+            else:
+                label_slice = self.cc_labels_data
+            rgb_slice = self.cc_color_lut[label_slice]  # (H, W, 3) uint8, via LUT lookup
+            self.current_pixmap = self.labels_to_qpixmap(rgb_slice)
+
+        else:
+            self.current_pixmap = self.numpy_to_qpixmap(current_2d, self._display_min, self._display_max)
+
+
         scaled_pixmap = self.current_pixmap.scaled(
             self.image_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -908,6 +1077,51 @@ class ImageViewer(QMainWindow):
         if self.current_image_data is not None and self.current_image_data.ndim == 4:
             self.time_label.setText(f"Time: {value} / {self.current_image_data.shape[0] - 1}")
             self.display_current_slice()
+    def on_cc_color_toggle(self, state):
+        """Switch the main view between the raw grayscale slice and connected-components colors."""
+
+        self.show_cc_colors = bool(state)
+        self.display_current_slice()
+
+    def _close_cc_results_window(self):
+        """Close the open results dialog, if any, without letting it act.
+
+        blockSignals() rather than disconnect(): closing the dialog normally
+        emits changes_reverted, and PySide6's disconnect() warns when nothing
+        is connected and raises on an already-deleted dialog.
+        """
+        window = self._cc_results_window
+        self._cc_results_window = None
+        if window is None:
+            return
+        try:
+            window.blockSignals(True)
+            window.close()
+            window.deleteLater() # it's parented to the viewer, so free it now rather than at exit
+        except RuntimeError:
+            pass # already deleted, nothing to do
+
+    def _reset_cc_state(self):
+
+        """Forget the current connected-components result.
+
+        Call this whenever the image or its labelling is replaced - a new
+        image, Binarize, or a fresh Connected Components run. Every piece of
+        CC state describes one labelling of one image, so none of it is valid
+        afterwards.
+        """
+        self._close_cc_results_window()
+        self.cc_result = None
+        self.cc_labels_data = None
+        self._cc_visible_labels = set()
+        self.cc_color_lut = None
+        self.show_cc_colors = False
+        self.cc_color_checkbox.setChecked(False)
+        self.cc_color_checkbox.setVisible(False)
+
+
+
+
 
     def open_image(self):
         """Open a file dialog to select a TIF image and display it."""
@@ -948,13 +1162,42 @@ class ImageViewer(QMainWindow):
         time series's numbers don't linger and get wrongly reused for whatever gets loaded next.
         """
 
+        # Normalise shapes that are really 2D but arrive with a third axis,
+        # otherwise every `ndim == 3` check downstream treats them as volumes:
+        # an RGB/RGBA image (H, W, 3|4), or a single-page stack (1, H, W).
+
+        if image_data.ndim == 3:
+            if image_data.shape[-1] in (3, 4):  # RGB or RGBA. in RGBA case, drop the alpha channel which controls transparency.
+                # Colour channels, not slices. These images are expected to be
+                # binary/greyscale here, so collapse to one channel rather than
+                # doing a weighted RGB->grey conversion.
+                image_data = image_data[..., 0]
+            elif image_data.shape[0] == 1:  # single-page stack, not a volume
+                image_data = image_data[0]
+
+        # A 2D array can only be a plain 2D image, whatever mode the caller
+        # guessed from the pre-normalisation shape. Several tools route on
+        # data_mode (Minkowski sends 'time_series' to the evolution dialog),
+        # so a stale mode would push a 2D image down a stack-processing path.
+
+        if image_data.ndim == 2:
+            data_mode = '2d'
+
+
+
         is_valid, unique_values = self.validate_binary_image(image_data)
 
         self.current_image_data = image_data
+        # print(f"Loaded image shape: {image_data.shape}")
         self.current_slice_index = 0
         self.current_time_index = 0
         self.data_mode = data_mode
         self.stack_labels = stack_labels
+
+        # A connected-components result belongs to the OLD image - reset it here so it
+        # doesn't linger and get wrongly displayed over unrelated new data.
+        self._reset_cc_state()
+
 
         # Computed ONCE for the whole volume (not per-slice) so display_current_slice() can
         # normalize every slice against the same range - see numpy_to_qpixmap's docstring.
@@ -1138,6 +1381,10 @@ class ImageViewer(QMainWindow):
         self._display_min = float(self.current_image_data.min())
         self._display_max = float(self.current_image_data.max())
 
+        # The previous labelling (and any open results dialog) describes the
+        # image as it was before binarizing - e.g. the other phase.
+        self._reset_cc_state()
+
         # Re-display (same slice index as before, now showing the binarized result)
         self.display_current_slice()
 
@@ -1243,9 +1490,329 @@ class ImageViewer(QMainWindow):
         result_window = MinkowskiResultsDialog(result, unit, is_3d, self)
         result_window.show()
 
+##------------------------------connected components--------------------------------------------
+    def open_connected_components_dialog(self):
+        """Open the connected-components settings dialog and run labeling on the current image."""
+
+        if self.data_mode in ('4d_time_series', '4d_time_series_streaming'):
+            # Streaming mode only holds the FIRST volume as a preview (ndim 3),
+            # so without this it'd be labelled as if that one time step were
+            # the whole dataset.
+            QMessageBox.warning(
+                self, "Not Available",
+                "Connected components isn't available for 3D time series (4D data) "
+                "yet - it works on single 2D images, 3D volumes, and 2D time series."
+            )
+            return
+
+
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
+        if self.current_image_data.ndim not in (2, 3):
+            QMessageBox.warning(
+                self, "Not applicable",
+                "Connected components needs a single 2D image, a 3D volume, or a 2D time series."
+            )
+            return
+
+        # A 2D time series is stacked as (T, H, W) - ndim 3, same as a volume -
+        # so shape alone can't tell them apart; data_mode can. Each frame gets
+        # 2D connectivity (4/8), not 3D (6/18/26).
+        per_frame = self.data_mode == 'time_series'
+        is_3d = self.current_image_data.ndim == 3 and not per_frame
+
+        dialog = ConnectedComponentsSettingsDialog(is_3d=is_3d, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return # user cancelled
+        
+        # Relabelling invalidates the previous result, and any results dialog
+        # still open for it - OK on that dialog would commit label ids from
+        # the old labelling against the new one.
+        self._reset_cc_state()
+
+        self._cc_is_3d = is_3d # stashed for open_measurements_dialog's is_3d branching later
+
+        self.progress_bar.setVisible(True)
+        self.status_bar.showMessage(f"Labeling connected components (connectivity={dialog.get_connectivity()})...")
+        QApplication.processEvents()
+
+        self.cc_thread = ConnectedComponentsThread(
+            self.current_image_data, connectivity=dialog.get_connectivity(),
+             is_3d=is_3d, per_frame=per_frame
+        )
+
+        self.cc_thread.finished.connect(self.on_connected_components_finished)
+        self.cc_thread.error.connect(self.on_connected_components_error)
+        self.cc_thread.start()
+
+    def on_connected_components_finished(self, result:dict):
+        """Handle completion of connected-components labeling - store the result and
+        color every component (no filtering or measurements yet - those happen in the
+        Measurements step, which needs this result to already exist)."""
+
+        self.progress_bar.setVisible(False)
+        self.cc_result = result
+
+        labels = result['labels']
+        n_labels = int(labels.max())
+        rng = np.random.default_rng(0)
+        colors = (rng.random((n_labels + 1, 3)) * 255).astype(np.uint8)
+        colors[0] = 0  # background stays black
+        self.cc_labels_data = labels
+        self.cc_color_lut = colors
+
+        self.cc_color_checkbox.setVisible(True)
+        self.cc_color_checkbox.setChecked(True)
+        self.show_cc_colors = True
+        self.display_current_slice()
+
+        if self.data_mode == 'time_series':
+            n_frames = self.current_image_data.shape[0]
+            self.status_bar.showMessage(
+                f"Connected components: {result['num_components']} found across "
+                f"{n_frames} frames, each frame labelled separately."
+            )
+        else:
+
+            self.status_bar.showMessage(
+                f"Connected components: {result['num_components']} found - "
+                f"run Image Analysis > Measurements... to filter/measure them")
+
+    def on_connected_components_error(self, error_msg: str):
+        """Handle error during connected-components labeling."""
+
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "Connected Components Error", f"Error labeling components:\n{error_msg}")
+        self.status_bar.showMessage(f"Error: {error_msg}")
+
+    def open_measurements_dialog(self):
+        """Open the measurements settings dialog and run measurements on the last
+        connected-components result."""
+
+        # Checked before the cc_result guard on purpose - "run Connected
+        # Components first" would just send someone into a dead end.
+        # Same mode tuple Minkowski uses to route to its evolution dialog.
+
+        if self.data_mode in ('time_series', '4d_time_series', '4d_time_series_streaming'):
+            QMessageBox.information(
+                self, "Measurements Not Available",
+                "Measurements are currently available for single 2D images and 3D"
+                " volumes only.\n \n" \
+                "Time series (2D + time or 3D + time) aren't supported yet - per-frame "
+                "measurement tables are planned for a later version. Connected "
+                "Components still works on 2D time series, labelling each frame "
+                "separately."
+            )
+            return
+
+        if self.cc_result is None:
+            QMessageBox.warning(
+                self, "No Connected Components Result",
+                "Please run Image Analysis > Connected Components... first."
+                )
+            return
+
+        dialog = MeasurementsSettingsDialog(
+            is_3d=self._cc_is_3d, num_components=self.cc_result['num_components'], parent=self
+        )
+
+        if dialog.exec() != QDialog.Accepted:
+            return  # user cancelled
+
+        self._measurements_unit = dialog.get_unit()
+        self._measurements_min_size = dialog.get_min_size()
+        self._measurements_selected = dialog.get_selected_measurements()
+
+        # A results dialog from the previous run would keep acting on state
+        # this run is about to rebuild. Close it before the thread starts, so
+        # OK on it can't race the new run, then refresh to drop any deletions
+        # it was previewing but never committed.
+        self._close_cc_results_window()
+        self._refresh_cc_display()
+
+        self.progress_bar.setVisible(True)
+        self.status_bar.showMessage("Computing measurements...")
+        QApplication.processEvents()
+
+        self.measurements_thread = MeasurementsThread(
+            self.cc_result, self._cc_is_3d, dialog.get_resolution(), self._measurements_selected,
+            min_size=self._measurements_min_size)
+        self.measurements_thread.finished.connect(self.on_measurements_finished)
+        self.measurements_thread.error.connect(self.on_measurements_error)
+        self.measurements_thread.start()
+
+    def on_measurements_finished(self, merged_table):
+        """Handle completion of the measurement step - filter by min size, keep only
+        the selected measurement columns, refresh the colored view, and show results."""
+
+        # print("DEBUG measurements finished: merged_table rows:", len(merged_table),
+        #       "| cc_result table rows:", len(self.cc_result['table']))
+        
+        self.progress_bar.setVisible(False)
+
+        count_col = 'voxel_count' if self._cc_is_3d else 'pixel_count'
+        measure_col = 'volume' if self._cc_is_3d else 'area'
+        total_components = self.cc_result['num_components']
+
+        filtered_table = merged_table[merged_table[count_col] >= self._measurements_min_size].reset_index(drop=True)
+        display_table = filtered_table[['label', count_col, measure_col] + self._measurements_selected]
+
+        # The min-size filter sets the baseline set of visible components;
+        # deletions in the results dialog subtract from it.
+        self._cc_visible_labels = set(filtered_table['label'].to_numpy().tolist())
+
+        # LUT is built over EVERY label, not just the visible ones - that way
+        # deleting a component leaves every survivor's colour unchanged instead
+        # of reshuffling the whole palette on each edit.
+
+        labels = self.cc_result['labels']
+        n_labels = int(labels.max())
+        rng = np.random.default_rng(0)
+        colors = (rng.random((n_labels + 1, 3)) * 255).astype(np.uint8)
+        colors[0] = 0
+        self.cc_color_lut = colors
+
+        self.show_cc_colors = True
+        self.cc_color_checkbox.setChecked(True)
+        self._refresh_cc_display()   # replaces the inline masking + display_current_slice()
+
+        # Show the results table in a new dialog
+        result_window = ConnectedComponentsResultsDialog(
+            display_table, self._measurements_unit, self._cc_is_3d, total_components, self
+        )
+
+        # Same signal/slot wiring as the calculation threads above - the dialog
+        # reports what the user wants, the viewer owns the label volume and acts.
+        result_window.preview_requested.connect(self._refresh_cc_display)
+        result_window.changes_committed.connect(self.on_cc_changes_committed)
+        result_window.changes_reverted.connect(self._refresh_cc_display)
+
+        # Kept so the dialog can be closed whenever the labelling it shows is
+        # replaced - see _close_cc_results_window.
+        self._cc_results_window = result_window
+
+        result_window.show()
+        self.status_bar.showMessage(f"Measurements: {total_components} components found - {len(display_table)} shown")
+
+    def _refresh_cc_display(self, hidden_labels=frozenset()):
+        """Rebuild the colored slice from the visible components, minus whatever
+        the results dialog is currently hiding.
+
+        Only cc_labels_data changes - the colour LUT covers every label, so
+        surviving components keep the same colour across edits instead of the
+        whole palette reshuffling each time something is deleted.
+
+        _refresh_cc_display takes a default of frozenset() because it gets 
+        connected to two different signals — 
+        preview_requested passes a set of labels to hide,
+          while changes_reverted passes nothing at all. Revert is just "refresh with nothing hidden."
+
+        """
+        if self.cc_result is None:
+            return
+
+    
+        labels = self.cc_result['labels']
+        # visible = allowed labels - temporarily hidden labels.
+        visible = self._cc_visible_labels - set(hidden_labels or ())
+
+        # Same LUT-masking trick already used in on_measurements_finished:
+        # build a boolean lookup indexed by label id, then index the whole
+        # volume through it in one vectorised pass.
+        max_label = int(labels.max())
+        keep = np.zeros(max_label + 1, dtype=bool)
+        # If there are any components to display, mark their
+        # positions in the lookup table as True. Ignore any id beyond the
+        # volume's current max - that only happens if the visible set has
+        # drifted out of sync, and a missing colour beats an IndexError that
+        # takes the window down.
+        visible = {label for label in visible if label <= max_label}
+        if visible:
+            keep[np.fromiter(visible, dtype=int)] = True
+
+        # Importantly, surviving components retain their original
+        # label IDs, so their assigned colors remain unchanged.
+        self.cc_labels_data = np.where(keep[labels], labels, 0)
+        # Redraw the current slice using the updated labeled data.
+        self.display_current_slice()
+
+    def on_cc_changes_committed(self, deleted_labels):
+        """
+        Permanently delete selected connected components from the label volume.
+
+        This function is called when the user confirms deletions by clicking
+        OK in the results dialog.
+
+        Deleted components are replaced with background (label 0), so they
+        will not reappear if measurements are performed again.
+        """
+
+        # print("DEBUG commit: deleting", len(deleted_labels), "labels")
+        # print("  BEFORE  table rows:", len(self.cc_result['table']),
+        #       "| image fg:", int(self.current_image_data.sum()),
+        #       "| num_components:", self.cc_result['num_components'])      # temp
+        
+        if self.cc_result is None:
+            return
+
+        # Keep exactly what the dialog was showing, minus whatever was deleted.
+        # Components hidden by the min-size filter were never visible and the
+        # preview already showed them gone, so OK means "make the volume match
+        # what I'm looking at" - otherwise they survive in cc_result and come
+        # straight back on the next Measurements run.
+
+        keep_labels = self._cc_visible_labels - set(deleted_labels)
+
+        labels = self.cc_result['labels']
+        keep = np.zeros(int(labels.max()) + 1, dtype=bool)
+        if keep_labels:
+            keep[np.fromiter(keep_labels, dtype=int)] = True
+
+        self.cc_result['labels'] = np.where(keep[labels], labels, 0)
+        self.cc_result['table'] = self.cc_result['table'][
+            self.cc_result['table']['label'].isin(keep_labels)
+        ].reset_index(drop=True)
+        self.cc_result['num_components'] = len(keep_labels)
+        self._cc_visible_labels = keep_labels
+
+        # The surviving components become the new working image, so Minkowski,
+        # SMDs, REV and a fresh Connected Components run all see what's left.
+        self.current_image_data = (self.cc_result['labels'] > 0).astype(np.uint8)
+        self._display_min = float(self.current_image_data.min())
+        self._display_max = float(self.current_image_data.max())
+
+        self._refresh_cc_display()
+        self.status_bar.showMessage(
+            f"Kept {len(keep_labels)} component(s) - image updated"
+        )
+        
+        
+        # print("  AFTER   table rows:", len(self.cc_result['table']),
+        #       "| image fg:", int(self.current_image_data.sum()),
+        #       "| num_components:", self.cc_result['num_components'])
+
+    def on_measurements_error(self, error_msg: str):
+        """Handle error during the measurement step."""
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "Measurements Error", f"Error computing measurements:\n{error_msg}")
+        self.status_bar.showMessage(f"Error: {error_msg}")
+
+
+
+
+
+
+
+
+
+
+
+
 
 
     
+    ##------------------------------polytope calculation--------------------------------------------
     def on_polytope_calculation_finished(self, raw_curves: dict, scaled_curves: dict):
         """Handle completion of polytope calculation.
         (Real plot window comes in the next step - for now just confirm it worked.)
