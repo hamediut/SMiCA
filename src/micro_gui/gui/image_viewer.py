@@ -53,7 +53,7 @@ from .minkowski_results_dialog import MinkowskiResultsDialog
 from .minkowski_evolution_settings_dialog import MinkowskiEvolutionSettingsDialog
 from .minkowski_evolution_plot_window import MinkowskiEvolutionPlotWindow
 
-from ..utils.image_utils import load_multipage_tif
+from ..utils.image_utils import load_multipage_tif, long_path_safe
 
 #connected components
 from ..analysis.connected_components import (
@@ -1252,7 +1252,7 @@ class ImageViewer(QMainWindow):
     def _load_and_stack_2d_files(self, file_paths):
 
         """Load a list of 2D image files and stack them into a single (N, H, W) array."""
-        slices = [np.array(Image.open(p)) for p in file_paths]
+        slices = [np.array(Image.open(long_path_safe(p))) for p in file_paths]
         shapes = {s.shape for s in slices}
         if len(shapes) > 1:
             raise ValueError(f"Not all files have the same shape - found: {shapes}")
