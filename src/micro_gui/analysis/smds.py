@@ -208,10 +208,18 @@ def calculate_s2_3d(images: np.ndarray, directional: bool = False) -> np.ndarray
     return average
 
 def cal_fn( polytope:np.ndarray, n:int)->np.ndarray:
-    """This function calculates scaled autocovariance function from Pn function.
-    polytope:polytope function it can be two point correlation function (s2) or 
-    higher order functions such as p3, p4, etc
-    n: order of polytope e.g., n =2 for two-point correlation (s_2), n= 3 for p3h and p3v"""
+    """Scaled polytope function f_n(r) from a raw Pn(r) curve:
+
+        f_n(r) = (Pn(r) - phi^n) / (phi - phi^n),   phi = Pn(0)
+
+    At r = 0 all n vertices sit on the same pixel, so Pn(0) = phi (the volume fraction);
+    at large r they are uncorrelated, so Pn -> phi^n. f_n therefore goes from 1 at r = 0
+    towards 0 once the structure has decorrelated. It is NOT forced to reach 0 at the last
+    sampled r - a tail above 0 means the structure is still correlated at that distance,
+    and small negative values around 0 are normal sampling noise.
+
+    polytope: raw Pn curve, e.g. S2 or a higher-order polytope function (P3H, P3V, P4, P6).
+    n: number of vertices of the polytope - 2 for S2, 3 for P3H/P3V, 4 for P4, 6 for P6."""
     numerator = polytope - polytope[0] ** n
     denominator = polytope[0] - polytope[0] ** n
     fn_r = numerator/ denominator
@@ -732,6 +740,9 @@ class Microstructure:
 
     # scaled correlations from polytopes
     def calculate_polytope_fn(self):
+        """Legacy scaling for the old C++ workflow: uses the LAST sampled point of each Pn
+        curve as its long-range floor. The GUI (calculate_polytopes_python) instead uses
+        cal_fn(), whose floor is phi^n - kept as-is here so old results stay reproducible."""
 
         try:
             Pn = self.polytope_P3V[:, 1]
@@ -1133,8 +1144,8 @@ def scale_c2_by_connectedness(c2_values: np.ndarray, s2_values: np.ndarray) -> n
     apart are already known to be in the same phase, the probability that they are also in
     the same connected cluster.
 
-    Unlike scale_by_initial_value() (C2(r)/C2(0), which only guarantees f(0)=1), this ratio
-    is bounded in [0, 1] at EVERY r, not just at r=0 - C2(r) <= S2(r) always holds (being in
+    Unlike dividing by its own r=0 value (C2(r)/C2(0), which only guarantees f(0)=1), this
+    ratio is bounded in [0, 1] at EVERY r, not just at r=0 - C2(r) <= S2(r) always holds (being in
     the same cluster is a strictly stronger condition than being in the same phase), so the
     ratio can never exceed 1. It also automatically equals 1 at r=0 (C2(0) = S2(0) = phi), so
     it still fits the same "starts at 1" visual convention as the other scaled f(r) curves.
@@ -1420,9 +1431,9 @@ def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
 
     Unlike C2, L(r) decays to 0 as r grows for any structure that isn't 100% foreground (an
     entire line segment fully inside the foreground phase becomes vanishingly likely once r
-    exceeds the largest chord in the material) - it does NOT plateau at a nonzero value the
-    way C2 can for a percolating structure, so scale_by_initial_value() (L(r)/L(0)) is the
-    appropriate scaling here, not scale_c2_by_connectedness() or scale_polytope_fn().
+    exceeds the largest chord in the material) - it does NOT level off at a nonzero value the
+    way S2 (at phi^2) or C2 (for a percolating structure) can, so its scaled curve is
+    scale_by_initial_value() (L(r)/L(0)), the same scaling the 2D L uses.
 
     Args:
         image_data: 3D binary image array (values should be 0 and 1)
@@ -1860,46 +1871,17 @@ def compute_p6_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
     return hexv / (maxx * maxx)
 
 
-def scale_polytope_fn(poly_values: np.ndarray) -> np.ndarray:
-    """
-    Scaled version f(r) of a raw polytope curve Pn(r), in roughly [0, 1]:
-        f(r) = (Pn(r) - Pn_inf) / (Pn(0) - Pn_inf)
-    where Pn_inf is the long-range plateau value (the last sampled point, or the
-    second-to-last if the last is exactly 0.0 - e.g. because the largest distance had no
-    valid samples). Matches Microstructure.calculate_polytope_fn() for P3H/P3V/P4/P6V.
-    """
-    phi = poly_values[0]
-    phi_n = poly_values[-1] if poly_values[-1] != 0.0 else poly_values[-2]
-    return (poly_values - phi_n) / (phi - phi_n)
-
-
 def scale_by_initial_value(values: np.ndarray) -> np.ndarray:
     """
     Normalize a curve by its own r=0 value: f(r) = values(r) / values(0).
 
-    Unlike scale_polytope_fn() (which subtracts an assumed long-range plateau - appropriate
-    for functions like S2/P3H/P3V/P4/P6 that provably converge to some power of the volume
-    fraction at large r), this makes no assumption about what the curve converges to. It
-    just rescales so f(0) = 1 and lets the curve decay to wherever it naturally goes.
-
-    Use this for the two-point cluster function C2, whose long-range behaviour is governed
-    by percolation (whether some single cluster actually spans the given distance) rather
-    than by volume fraction alone - there is no theoretical plateau value to subtract the
-    way there is for S2 and the other polytope functions, and subtracting an estimated one
-    (scale_polytope_fn's approach) just introduces noise from a single sampled point.
+    Used for the lineal-path function L (2D and 3D). This is the same idea as cal_fn() -
+    f(r) = (P(r) - P_inf) / (P(0) - P_inf) - with P_inf = 0, because L(r) decays to 0 at
+    large r for any structure that isn't 100% foreground (an entire segment of length r
+    lying inside the phase becomes impossible once r exceeds the longest chord). So f(0) = 1
+    and f(r) -> 0, the same visual convention as the other scaled curves.
     """
     return values / values[0]
-
-
-def scale_s2(s2_values: np.ndarray, vol_fraction: float) -> np.ndarray:
-    """
-    Scaled autocovariance f(r) from S2(r):  f(r) = (S2(r) - phi^2) / (phi * (1 - phi))
-    Matches Microstructure.calculate_scaled_autocovariance().
-    """
-    phi1 = vol_fraction
-    phi2 = 1.0 - phi1
-    xi = s2_values - phi1 ** 2
-    return xi / (phi1 * phi2)
 
 
 def calculate_polytopes_python(image: np.ndarray,
@@ -1920,18 +1902,14 @@ def calculate_polytopes_python(image: np.ndarray,
     -------
     raw : dict {name -> Nt x 2 array of [r, value]}, same layout as np.loadtxt('SobjXXX.txt')
           in the old cpp-based workflow.
-    scaled : dict {name -> Nt x 2 array of [r, f(r)]}, the normalised companion curve - same
-          as the polyfn_* / scal_autocov attributes on the old Microstructure class. Note: as
-          in the original code, 'L' does not get its own scaling formula - it reuses the
-          S2-based scaled autocovariance (calculate_polytopes()'s 'L' branch does the same).
+    scaled : dict {name -> Nt x 2 array of [r, f(r)]}, the normalised companion curve:
+          S2, P3H, P3V, P4 and P6 are scaled with cal_fn() as (Pn - phi^n) / (phi - phi^n),
+          n = number of vertices (2, 3, 3, 4, 6); L is scaled as L(r) / L(0)
+          (scale_by_initial_value()). Only the RAW curves match the old C++ workflow - the
+          old Microstructure class scaled the polytopes against their last sampled point
+          instead of phi^n, and reused the S2 curve for L.
     """
     config, maxx, nt = _build_padded_config(image)
-    vol_fraction = float(np.mean(image != 0))
-
-    # S2 is always computed: needed on its own if requested, and as the basis of the scaled
-    # companion curve for 'L' (mirrors the original code's behaviour, see docstring above).
-    s2 = compute_s2_polytope(config, maxx, nt)
-    s2_scaled = scale_s2(s2, vol_fraction)
 
     r_axis = np.arange(nt, dtype=np.float64)
     raw: Dict[str, np.ndarray] = {}
@@ -1939,22 +1917,23 @@ def calculate_polytopes_python(image: np.ndarray,
 
     for name in polytopes:
         if name == 's2':
-            values, values_scaled = s2, s2_scaled
+            values = compute_s2_polytope(config, maxx, nt)
+            values_scaled = cal_fn(values, n=2)             # (S2 - phi^2) / (phi - phi^2), same formula as the GUI's S2
         elif name == 'L':
             values = compute_L_polytope(config, maxx, nt)
-            values_scaled = s2_scaled
+            values_scaled = scale_by_initial_value(values)  # L(r)/L(0): L's OWN curve; L -> 0 at large r, so no floor to subtract
         elif name == 'p3h':
             values = compute_p3h_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=3)             # triangle: 3 vertices -> long-range limit phi^3
         elif name == 'p3v':
             values = compute_p3v_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=3)
         elif name == 'p4':
             values = compute_p4_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=4)             # square: 4 vertices -> phi^4
         elif name == 'p6':
             values = compute_p6_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=6)             # hexagon: 6 vertices -> phi^6
         else:
             raise ValueError(f"Unknown polytope '{name}'. Use one of: s2, L, p3h, p3v, p4, p6.")
 
