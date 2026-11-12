@@ -20,8 +20,8 @@ class PolytopeSettingsDialog(QDialog):
     """
 
     # (internal name, display label) - internal name is exactly what
-    # calculate_s2()/calculate_polytopes_python() expect as keys, so there's
-    # only one place to edit if a new polytope function is added later.
+    # compute_2d_polytope_curves()/compute_3d_polytope_curves() expect as keys, so
+    # there's only one place to edit if a new polytope function is added later.
 
     POLYTOPE_OPTIONS = [
         ('s2', 'S2 (two-point correlation)'),

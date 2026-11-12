@@ -21,11 +21,6 @@ from .save_dialog_helper import suggested_open_dir, remember_open_dir
 from .rev_plot_window import RevPlotWindow
 from ..analysis.smds import (
     RES, REV,
-     calculate_s2, calculate_s2_periodic , calculate_s2_3d,
-     calculate_polytopes_python, calculate_c2,
-     cal_fn, scale_polytope_fn, scale_by_initial_value, scale_c2_by_connectedness,
-     calculate_c2_3d, calculate_s2_periodic_3d,
-     calculate_L_3d,
      omega_n, delta_omega,
      compute_2d_polytope_curves, compute_3d_polytope_curves,
      compute_chord_length_result
@@ -114,10 +109,10 @@ class PolytopeCalculationThread(QThread):
     """
     Thread for running polytope function calculations in the background.
 
-    S2 is computed with the existing calculate_s2() (non-periodic boundary)
-     so it matches the "Calculate SMDS" feature elsewhere in the GUI. All other selected
-    functions (P3H, P3V, P4, P6, L) are computed in one call to calculate_polytopes_python(),
-      the pure-Python/numba port of the C++ code.
+    The calculation logic itself lives in smds.py: compute_2d_polytope_curves() for a 2D
+    image, compute_3d_polytope_curves() for a 3D volume. The slice/time evolution threads
+    call the same two helpers once per slice, so a single image and one frame of a time
+    series are always computed identically.
     """
 
 
@@ -129,7 +124,7 @@ class PolytopeCalculationThread(QThread):
         Initialize the polytope calculation thread.
 
         Args:
-            image_data: The 2D image data to process
+            image_data: The 2D image or 3D volume to process
             selected_polytopes: List of selected polytope function names
         """
         super().__init__()
@@ -140,48 +135,19 @@ class PolytopeCalculationThread(QThread):
         """Run the selected polytope calculations in a separate thread."""
         
         try:
+            # Choose the helper once from the dimensionality - same pattern as
+            # SliceEvolutionThread.run() uses per slice.
 
-            if self.image_data.ndim ==3:
-                # 3D volume: s2/c2/L, computed by the same helper the 4D slice/time
-                # evolution thread will use per time step (see compute_3d_polytope_curves
-                # in smds.py) - one shared place for the 3D branching logic instead of two.
-                raw_curves, scaled_curves = compute_3d_polytope_curves(self.image_data, self.selected_polytopes)
+            compute_curves = (compute_3d_polytope_curves if self.image_data.ndim == 3
+                              else compute_2d_polytope_curves)
 
-            else:
-                raw_curves = {}
-                scaled_curves = {}
-
-                # S2 uses the same (non-periodic) code as "Calculate SMDS", so results
-                # are consistent between the two menu items for the same image.
-
-                if 's2' in self.selected_polytopes:
-                    s2_values = calculate_s2(self.image_data)
-                    f2_values = cal_fn(s2_values, n = 2)
-                    r_axis =  np.arange(len(s2_values), dtype=np.float64)
-                    raw_curves['s2'] = np.column_stack((r_axis, s2_values))
-                    scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
-
-                if 'c2' in self.selected_polytopes:
-                    c2_values = calculate_c2(self.image_data)
-                    s2_periodic_values = calculate_s2_periodic(self.image_data)  # S2 with the SAME periodic convention as C2 (needed as the denominator)
-                    # --- current approach: conditional connectedness C2(r)/S2(r) ---
-                    f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)  # P(same cluster | same phase) at r - bounded [0,1] at every r, not just r=0
-                    r_axis = np.arange(len(c2_values), dtype=np.float64)
-                    raw_curves['c2'] = np.column_stack((r_axis, c2_values))
-                    scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
-            
-                # 2D 'L' still goes through calculate_polytopes_python below, same as before - only 3D 'L'
-                # gets the dedicated branch above, since the 2D path is already validated against the C++.
-                other_polytopes = [name for name in self.selected_polytopes if name not in ('s2', 'c2')]
-                if other_polytopes:
-                    other_raw, other_scaled = calculate_polytopes_python(
-                        self.image_data, polytopes=tuple(other_polytopes)
-                        )
-                    raw_curves.update(other_raw)
-                    scaled_curves.update(other_scaled)
+            raw_curves, scaled_curves = compute_curves(self.image_data, self.selected_polytopes)
             self.finished.emit(raw_curves, scaled_curves)
+
+               
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(str(e))  # the thread can't show a dialog itself - hand the message to the GUI thread
+
 
 
 ##-----------------------------------------------------

@@ -130,6 +130,12 @@ def calculate_s2(image_data: np.ndarray) -> np.ndarray:
     This function computes the two-point correlation in multiple directions
     and returns the averaged S2 values as a function of distance.
 
+    Non-periodic: each row/column only uses the pairs that fit inside the image, divided
+    by their number (N - r). NOT used by the GUI - the app uses the periodic
+    calculate_s2_periodic() everywhere (polytope plots, REV/RES, Chord Length; Torquato
+    2002, Sec. 12.5.1). Kept as a non-periodic reference estimator (tests, notebooks);
+    the two differ slightly at large r.
+
     Args:
         image_data: 2D binary image array (values should be 0 and 1)
 
@@ -165,6 +171,10 @@ def calculate_s2_3d(images: np.ndarray, directional: bool = False) -> np.ndarray
 
     This function calculates S2 values for 3D image volumes by computing
     correlations in all three principal directions and averaging them.
+
+    Non-periodic, like calculate_s2(). NOT used by the GUI - the app uses the periodic
+    calculate_s2_periodic_3d() everywhere. Kept as a non-periodic reference estimator
+    (tests, notebooks).
 
     Args:
         images: 3D binary image array (values should be 0 and 1)
@@ -208,10 +218,18 @@ def calculate_s2_3d(images: np.ndarray, directional: bool = False) -> np.ndarray
     return average
 
 def cal_fn( polytope:np.ndarray, n:int)->np.ndarray:
-    """This function calculates scaled autocovariance function from Pn function.
-    polytope:polytope function it can be two point correlation function (s2) or 
-    higher order functions such as p3, p4, etc
-    n: order of polytope e.g., n =2 for two-point correlation (s_2), n= 3 for p3h and p3v"""
+    """Scaled polytope function f_n(r) from a raw Pn(r) curve:
+
+        f_n(r) = (Pn(r) - phi^n) / (phi - phi^n),   phi = Pn(0)
+
+    At r = 0 all n vertices sit on the same pixel, so Pn(0) = phi (the volume fraction);
+    at large r they are uncorrelated, so Pn -> phi^n. f_n therefore goes from 1 at r = 0
+    towards 0 once the structure has decorrelated. It is NOT forced to reach 0 at the last
+    sampled r - a tail above 0 means the structure is still correlated at that distance,
+    and small negative values around 0 are normal sampling noise.
+
+    polytope: raw Pn curve, e.g. S2 or a higher-order polytope function (P3H, P3V, P4, P6).
+    n: number of vertices of the polytope - 2 for S2, 3 for P3H/P3V, 4 for P4, 6 for P6."""
     numerator = polytope - polytope[0] ** n
     denominator = polytope[0] - polytope[0] ** n
     fn_r = numerator/ denominator
@@ -219,10 +237,11 @@ def cal_fn( polytope:np.ndarray, n:int)->np.ndarray:
 
 def calculate_s2_4d(images: np.ndarray):
     """
-    Calculate average two-point correlation for a 4D stacks ( a stacks of 3D volumes, not time series).
+    Calculate S2 and scaled S2 (F2) for a stack of 3D volumes (e.g. the random subvolumes
+    of one size in REV() - a stack of samples, not a time series), and summarise them per r.
 
-    This function computes S2 values for 4D image data by calculating
-    correlations in all four principal directions and averaging them.
+    Each volume's S2 is the periodic S2 from calculate_s2_periodic_3d() (Torquato 2002,
+    Sec. 12.5.1) - the same S2 the 3D polytope plots use - scaled with cal_fn(n=2).
 
     Args:
         images: 4D binary image array (values should be 0 and 1)
@@ -230,25 +249,15 @@ def calculate_s2_4d(images: np.ndarray):
     Returns:
     df_s2_grouped: a dataframe containing  average S2 values for all 3D volumes in the 4D stack.
     df_f2_grouped: a dataframe containing  average F2 values for all 3D volumes in the 4D stack.
-    
+
     """
-    Nr = min(images.shape[1:])//2
     s2_list = []
     f2_list = []
 
     for i in range(images.shape[0]):
-        
-        two_point_covariance = {}
-        for j, direc in enumerate(["x", "y", "z"]) :
-            two_point_direc = two_point_correlation3D(images[i], j, var = 1)
-            two_point_covariance[direc] = two_point_direc
-    
-        direc_covariances = {}
-        for direc in ["x", "y", "z"]:
-            direc_covariances[direc] = np.mean(np.mean(two_point_covariance[direc], axis=0), axis=0)[: Nr]
-        s2_average = (direc_covariances['x'] + direc_covariances['y'] + direc_covariances['z'])/3
-        s2_list.append(s2_average)
-        f2_list.append(cal_fn(s2_average, n = 2))
+        s2_values = calculate_s2_periodic_3d(images[i])
+        s2_list.append(s2_values)
+        f2_list.append(cal_fn(s2_values, n = 2))
     # s2--------------------
     df_s2_list = []
     for k in np.arange(0, len(s2_list)):
@@ -276,6 +285,8 @@ def REV(image: np.ndarray,
     """
     This function receives a 3D (XCT) image and calculates average S2 and F2 for the whole image and a number of random subvolumes.
     These average correlation functions can then be analysed to determine the REV for the image.
+    S2 is the periodic S2 (calculate_s2_periodic_3d()), the same one the polytope plots use,
+    and F2 is its scaled form cal_fn(S2, n=2).
     Parameters
     ----------
     image: np.ndarray
@@ -318,7 +329,7 @@ def REV(image: np.ndarray,
     
     print('Calculating S2 and F2 for the whole volume ...')
     # calculate S2 and f2 for the whole volume
-    s2_avg_original  = calculate_s2_3d(image)
+    s2_avg_original  = calculate_s2_periodic_3d(image)
     f2_avg_original = cal_fn(s2_avg_original, n = 2)
 
     s2_3d_dict['original'] = s2_avg_original
@@ -332,39 +343,23 @@ def REV(image: np.ndarray,
 
 def calculate_two_point_list(images:np.ndarray) -> List[np.ndarray]:
     """
-    This function calculates average two-point correlations (s2 and fn) from n_imgs of images
-    and returns a list of all of them.
-    Parameters:
-    images: np.ndarray of shape (n_imgs, img_size, mg_size)
-    """
-    #Take average of directions; use half linear size assuming equal dimension sizes
-    Nr = min(images.shape[1:])//2
+    This function calculates S2 and its scaled form (F2) for each of n_imgs 2D images
+    (e.g. the random crops of one size in RES()) and returns them as two lists.
 
+    Each image's S2 is the periodic S2 from calculate_s2_periodic() (Torquato 2002,
+    Sec. 12.5.1) - the same S2 the polytope plots use - scaled with cal_fn(n=2).
+
+    Parameters:
+    images: np.ndarray of shape (n_imgs, img_size, img_size)
+    """
     s2_list = []
     f2_list = []
-    
-    for i in range(images.shape[0]):
-        # 1) convert each image in the batch to microstructure
-        # 2) calculate the requested polytope function including scaled version
-        # 3) append the results to the empty list above
-        
-        two_pt_dim0 = two_point_correlation(images[i], dim = 0, var = 1) #S2 in x-direction
-        # print(type(two_pt_dim0), two_pt_dim0.shape)
-        two_pt_dim1 = two_point_correlation(images[i], dim = 1, var = 1) #S2 in y-direction
-        # print(type(two_pt_dim1), two_pt_dim1.shape)
-        
 
-        S2_x = np.average(two_pt_dim1, axis=0)[:Nr]
-        S2_y = np.average(two_pt_dim0, axis=0)[:Nr]
-        S2_average = ((S2_x + S2_y)/2)[:Nr]
-        
-        s2_list.append(S2_average)
-        
-        # autoscaled covriance---------------------------------------
-        # f_average = (S2_average - S2_average[0]**2)/S2_average[0]/(1 - S2_average[0])
-        f_average = cal_fn(S2_average, n= 2)
-        f2_list.append(f_average)
-        
+    for i in range(images.shape[0]):
+        s2_values = calculate_s2_periodic(images[i])
+        s2_list.append(s2_values)
+        f2_list.append(cal_fn(s2_values, n= 2))
+
     return s2_list, f2_list
 
 
@@ -396,6 +391,8 @@ def RES(image: np.ndarray,
     """
     This function receives a 2D binary image and calculates average S2 and F2 for the whole image and a number of random crops.
     These average correlation functions can then be analysed to determine the RES for the image.
+    S2 is the periodic S2 (calculate_s2_periodic()), the same one the polytope plots use,
+    and F2 is its scaled form cal_fn(S2, n=2).
     Parameters
     ----------
     image: np.ndarray
@@ -442,7 +439,7 @@ def RES(image: np.ndarray,
 
     print('Calculating S2 and F2 for the whole volume ...')
     # calculate S2 and f2 for the whole volume
-    s2_avg_original  = calculate_s2(image)
+    s2_avg_original  = calculate_s2_periodic(image)
     f2_avg_original = cal_fn(s2_avg_original, n = 2)
 
     s2_dict['original'] = s2_avg_original
@@ -732,6 +729,9 @@ class Microstructure:
 
     # scaled correlations from polytopes
     def calculate_polytope_fn(self):
+        """Legacy scaling for the old C++ workflow: uses the LAST sampled point of each Pn
+        curve as its long-range floor. The GUI (calculate_polytopes_python) instead uses
+        cal_fn(), whose floor is phi^n - kept as-is here so old results stay reproducible."""
 
         try:
             Pn = self.polytope_P3V[:, 1]
@@ -1042,7 +1042,7 @@ def calculate_c2(image_data: np.ndarray) -> np.ndarray:
     C2(r) = P(two points a distance r apart belong to the same connected cluster of the
     foreground phase), periodic boundaries, 4-connectivity - matches
     GooseEYE.clusters(img, periodic=True) + GooseEYE.C2((Nr, Nr), C, C), radially averaged
-    over rows and columns the same way calculate_s2() averages S2.
+    over rows and columns the same way calculate_s2_periodic() averages S2.
 
     Args:
         image_data: 2D square binary image array (values should be 0 and 1)
@@ -1071,9 +1071,10 @@ def _s2_native_periodic_line(line: np.ndarray, n: int, nt: int) -> np.ndarray:
     For one periodic 1D line (a row or column), count for each distance r = 0..nt-1 how many
     pairs (i, i+r) [wrapped periodically, modulo the line's own length n] are both foreground.
     Same style as _cluster_line_pair_counts() above, but testing raw phase equality instead of
-    cluster-label equality - i.e. this is S2's building block, using the SAME periodic modulus
-    (n = image size) as calculate_c2()/_label_clusters_periodic(), unlike compute_s2_polytope()
-    below, which uses modulo image_size+1 to match the legacy C++ code.
+    cluster-label equality - i.e. this is S2's building block (calculate_s2_periodic() and
+    calculate_s2_periodic_3d()), using the SAME periodic modulus (n = the line's own length)
+    as calculate_c2()/_label_clusters_periodic(), unlike compute_s2_polytope() below, which
+    uses modulo image_size+1 to match the legacy C++ code.
     """
     counts = np.zeros(nt, dtype=np.float64)
     for i in range(n):
@@ -1089,42 +1090,47 @@ def _s2_native_periodic_line(line: np.ndarray, n: int, nt: int) -> np.ndarray:
 
 
 @jit(nopython=True)
-def _compute_s2_native_periodic(binary_image: np.ndarray, n: int, nt: int) -> np.ndarray:
-    """S2(r), periodic modulo the image's own size (matches calculate_c2()'s convention), averaged over rows+columns."""
+def _compute_s2_native_periodic(binary_image: np.ndarray, nt: int) -> np.ndarray:
+    """
+    S2(r), periodic: each row/column wraps around modulo its OWN length, so the image need
+    not be square (same approach as _compute_s2_native_periodic_3d()). Averaged over rows
+    and columns.
+    """
+    n_rows, n_cols = binary_image.shape
     total = np.zeros(nt, dtype=np.float64)
-    for row in range(n):
-        total += _s2_native_periodic_line(binary_image[row, :], n, nt)
-    for col in range(n):
-        total += _s2_native_periodic_line(binary_image[:, col], n, nt)
-    return total / (2.0 * n * n)
+    for row in range(n_rows):
+        total += _s2_native_periodic_line(binary_image[row, :], n_cols, nt)  # a row has n_cols pixels
+    for col in range(n_cols):
+        total += _s2_native_periodic_line(binary_image[:, col], n_rows, nt)  # a column has n_rows pixels
+    # rows give n_rows*n_cols trials, columns the same again -> both directions weigh equally
+    return total / (2.0 * n_rows * n_cols)
 
 
 def calculate_s2_periodic(image_data: np.ndarray) -> np.ndarray:
     """
-    Calculate the periodic two-point correlation S2(r) for a 2D binary image, using the same
-    periodic convention (modulo the image's own size, no padding) as calculate_c2(). This is
-    NOT the same curve as calculate_s2() (non-periodic/truncating) or the S2 computed
-    internally by calculate_polytopes_python() (periodic modulo image_size+1, to match the
-    legacy C++ code) - see the module docstring above the polytope section for why those
-    differ. Use this one specifically when you need an S2 curve directly comparable to
-    calculate_c2()'s output, e.g. for scale_c2_by_connectedness().
+    Periodic two-point probability function S2(r) of a 2D binary image - the S2 used
+    everywhere in the app: polytope plots, the denominator for
+    scale_c2_by_connectedness(), RES, and Chord Length.
+
+    Follows Torquato (2002), Random Heterogeneous Materials, Sec. 12.5.1: a segment of r
+    pixels is moved one pixel at a time along every row and column, and the number of
+    times both ends lie in the phase is divided by the number of trials (the system size
+    of the periodically replicated image). Same periodic convention as calculate_c2() and
+    the lineal-path functions. calculate_s2() is the non-periodic version (not used by
+    the GUI; kept as a reference).
 
     Args:
-        image_data: 2D square binary image array (values should be 0 and 1)
+        image_data: 2D binary image array (values should be 0 and 1); need not be square.
 
     Returns:
-        1D array of S2 values, r = 0..Nt-1 where Nt = image_size // 2
+        1D array of S2 values, r = 0..Nt-1 where Nt = min(image_data.shape) // 2
     """
     if image_data.ndim != 2:
         raise ValueError('calculate_s2_periodic only supports 2D images.')
-    if image_data.shape[0] != image_data.shape[1]:
-        raise ValueError('calculate_s2_periodic requires a square image.')
 
-    ns = image_data.shape[0]
-    nt = ns // 2
-
+    nt = min(image_data.shape) // 2  # same length as calculate_s2() returns
     binary = (image_data != 0).astype(np.uint8)
-    return _compute_s2_native_periodic(binary, ns, nt)
+    return _compute_s2_native_periodic(binary, nt)
 
 
 def scale_c2_by_connectedness(c2_values: np.ndarray, s2_values: np.ndarray) -> np.ndarray:
@@ -1133,8 +1139,8 @@ def scale_c2_by_connectedness(c2_values: np.ndarray, s2_values: np.ndarray) -> n
     apart are already known to be in the same phase, the probability that they are also in
     the same connected cluster.
 
-    Unlike scale_by_initial_value() (C2(r)/C2(0), which only guarantees f(0)=1), this ratio
-    is bounded in [0, 1] at EVERY r, not just at r=0 - C2(r) <= S2(r) always holds (being in
+    Unlike dividing by its own r=0 value (C2(r)/C2(0), which only guarantees f(0)=1), this
+    ratio is bounded in [0, 1] at EVERY r, not just at r=0 - C2(r) <= S2(r) always holds (being in
     the same cluster is a strictly stronger condition than being in the same phase), so the
     ratio can never exceed 1. It also automatically equals 1 at r=0 (C2(0) = S2(0) = phi), so
     it still fits the same "starts at 1" visual convention as the other scaled f(r) curves.
@@ -1157,10 +1163,12 @@ def scale_c2_by_connectedness(c2_values: np.ndarray, s2_values: np.ndarray) -> n
     such as https://arxiv.org/abs/2402.15815.
 
     Args:
-        c2_values: raw C2(r) array from calculate_c2().
-        s2_values: raw S2(r) array from calculate_s2_periodic(), computed on the SAME image -
-            not calculate_s2() (non-periodic) and not the polytope module's internal S2
-            (periodic modulo image_size+1), since those use different boundary conventions.
+        c2_values: raw C2(r) array from calculate_c2() (2D) or calculate_c2_3d() (3D).
+        s2_values: raw S2(r) array from calculate_s2_periodic() (2D) or
+            calculate_s2_periodic_3d() (3D), computed on the SAME image - the same S2 curve
+            the polytope plots show. Not calculate_s2()/calculate_s2_3d() (non-periodic)
+            and not the polytope module's internal S2 (periodic modulo image_size+1), since
+            those use different boundary conventions.
 
     Returns:
         1D array, g(0) = 1.0, bounded in [0, 1] elsewhere. NaN at any r where S2(r) == 0
@@ -1352,14 +1360,17 @@ def _compute_s2_native_periodic_3d(binary_image: np.ndarray, nt: int) -> np.ndar
 
 def calculate_s2_periodic_3d(image_data: np.ndarray) -> np.ndarray:
     """
-    Calculate the periodic two-point correlation S2(r) for a 3D binary volume, using the same
-    periodic convention as calculate_c2_3d() (modulo each axis's own length, no padding, no
-    cubic requirement). 3D analogue of calculate_s2_periodic() above - use this (not
-    calculate_s2_3d(), the existing non-periodic 3D S2), as the denominator for
-    scale_c2_by_connectedness() on 3D data.
+    Periodic two-point probability function S2(r) of a 3D binary volume - the S2 used
+    everywhere in the app for 3D data: polytope plots, the denominator for
+    scale_c2_by_connectedness(), REV (calculate_s2_4d()), and Chord Length.
+
+    3D analogue of calculate_s2_periodic() (Torquato 2002, Sec. 12.5.1): sampled along all
+    three axes, each wrapping around modulo its own length (no padding), and averaged.
+    Same periodic convention as calculate_c2_3d() and calculate_L_3d().
+    calculate_s2_3d() is the non-periodic version (not used by the GUI; kept as a reference).
 
     Args:
-        image_data: 3D binary image array (values should be 0 and 1)
+        image_data: 3D binary image array (values should be 0 and 1); need not be cubic.
 
     Returns:
         1D array of S2 values, r = 0..Nt-1 where Nt = min(image_data.shape) // 2
@@ -1420,9 +1431,9 @@ def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
 
     Unlike C2, L(r) decays to 0 as r grows for any structure that isn't 100% foreground (an
     entire line segment fully inside the foreground phase becomes vanishingly likely once r
-    exceeds the largest chord in the material) - it does NOT plateau at a nonzero value the
-    way C2 can for a percolating structure, so scale_by_initial_value() (L(r)/L(0)) is the
-    appropriate scaling here, not scale_c2_by_connectedness() or scale_polytope_fn().
+    exceeds the largest chord in the material) - it does NOT level off at a nonzero value the
+    way S2 (at phi^2) or C2 (for a percolating structure) can, so its scaled curve is
+    scale_by_initial_value() (L(r)/L(0)), the same scaling the 2D L uses.
 
     Args:
         image_data: 3D binary image array (values should be 0 and 1)
@@ -1860,46 +1871,17 @@ def compute_p6_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
     return hexv / (maxx * maxx)
 
 
-def scale_polytope_fn(poly_values: np.ndarray) -> np.ndarray:
-    """
-    Scaled version f(r) of a raw polytope curve Pn(r), in roughly [0, 1]:
-        f(r) = (Pn(r) - Pn_inf) / (Pn(0) - Pn_inf)
-    where Pn_inf is the long-range plateau value (the last sampled point, or the
-    second-to-last if the last is exactly 0.0 - e.g. because the largest distance had no
-    valid samples). Matches Microstructure.calculate_polytope_fn() for P3H/P3V/P4/P6V.
-    """
-    phi = poly_values[0]
-    phi_n = poly_values[-1] if poly_values[-1] != 0.0 else poly_values[-2]
-    return (poly_values - phi_n) / (phi - phi_n)
-
-
 def scale_by_initial_value(values: np.ndarray) -> np.ndarray:
     """
     Normalize a curve by its own r=0 value: f(r) = values(r) / values(0).
 
-    Unlike scale_polytope_fn() (which subtracts an assumed long-range plateau - appropriate
-    for functions like S2/P3H/P3V/P4/P6 that provably converge to some power of the volume
-    fraction at large r), this makes no assumption about what the curve converges to. It
-    just rescales so f(0) = 1 and lets the curve decay to wherever it naturally goes.
-
-    Use this for the two-point cluster function C2, whose long-range behaviour is governed
-    by percolation (whether some single cluster actually spans the given distance) rather
-    than by volume fraction alone - there is no theoretical plateau value to subtract the
-    way there is for S2 and the other polytope functions, and subtracting an estimated one
-    (scale_polytope_fn's approach) just introduces noise from a single sampled point.
+    Used for the lineal-path function L (2D and 3D). This is the same idea as cal_fn() -
+    f(r) = (P(r) - P_inf) / (P(0) - P_inf) - with P_inf = 0, because L(r) decays to 0 at
+    large r for any structure that isn't 100% foreground (an entire segment of length r
+    lying inside the phase becomes impossible once r exceeds the longest chord). So f(0) = 1
+    and f(r) -> 0, the same visual convention as the other scaled curves.
     """
     return values / values[0]
-
-
-def scale_s2(s2_values: np.ndarray, vol_fraction: float) -> np.ndarray:
-    """
-    Scaled autocovariance f(r) from S2(r):  f(r) = (S2(r) - phi^2) / (phi * (1 - phi))
-    Matches Microstructure.calculate_scaled_autocovariance().
-    """
-    phi1 = vol_fraction
-    phi2 = 1.0 - phi1
-    xi = s2_values - phi1 ** 2
-    return xi / (phi1 * phi2)
 
 
 def calculate_polytopes_python(image: np.ndarray,
@@ -1920,18 +1902,14 @@ def calculate_polytopes_python(image: np.ndarray,
     -------
     raw : dict {name -> Nt x 2 array of [r, value]}, same layout as np.loadtxt('SobjXXX.txt')
           in the old cpp-based workflow.
-    scaled : dict {name -> Nt x 2 array of [r, f(r)]}, the normalised companion curve - same
-          as the polyfn_* / scal_autocov attributes on the old Microstructure class. Note: as
-          in the original code, 'L' does not get its own scaling formula - it reuses the
-          S2-based scaled autocovariance (calculate_polytopes()'s 'L' branch does the same).
+    scaled : dict {name -> Nt x 2 array of [r, f(r)]}, the normalised companion curve:
+          S2, P3H, P3V, P4 and P6 are scaled with cal_fn() as (Pn - phi^n) / (phi - phi^n),
+          n = number of vertices (2, 3, 3, 4, 6); L is scaled as L(r) / L(0)
+          (scale_by_initial_value()). Only the RAW curves match the old C++ workflow - the
+          old Microstructure class scaled the polytopes against their last sampled point
+          instead of phi^n, and reused the S2 curve for L.
     """
     config, maxx, nt = _build_padded_config(image)
-    vol_fraction = float(np.mean(image != 0))
-
-    # S2 is always computed: needed on its own if requested, and as the basis of the scaled
-    # companion curve for 'L' (mirrors the original code's behaviour, see docstring above).
-    s2 = compute_s2_polytope(config, maxx, nt)
-    s2_scaled = scale_s2(s2, vol_fraction)
 
     r_axis = np.arange(nt, dtype=np.float64)
     raw: Dict[str, np.ndarray] = {}
@@ -1939,22 +1917,23 @@ def calculate_polytopes_python(image: np.ndarray,
 
     for name in polytopes:
         if name == 's2':
-            values, values_scaled = s2, s2_scaled
+            values = compute_s2_polytope(config, maxx, nt)
+            values_scaled = cal_fn(values, n=2)             # (S2 - phi^2) / (phi - phi^2), same formula as the GUI's S2
         elif name == 'L':
             values = compute_L_polytope(config, maxx, nt)
-            values_scaled = s2_scaled
+            values_scaled = scale_by_initial_value(values)  # L(r)/L(0): L's OWN curve; L -> 0 at large r, so no floor to subtract
         elif name == 'p3h':
             values = compute_p3h_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=3)             # triangle: 3 vertices -> long-range limit phi^3
         elif name == 'p3v':
             values = compute_p3v_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=3)
         elif name == 'p4':
             values = compute_p4_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=4)             # square: 4 vertices -> phi^4
         elif name == 'p6':
             values = compute_p6_polytope(config, maxx, nt)
-            values_scaled = scale_polytope_fn(values)
+            values_scaled = cal_fn(values, n=6)             # hexagon: 6 vertices -> phi^6
         else:
             raise ValueError(f"Unknown polytope '{name}'. Use one of: s2, L, p3h, p3v, p4, p6.")
 
@@ -1970,22 +1949,27 @@ def compute_2d_polytope_curves(image_2d: np.ndarray, selected_polytopes: List[st
     Shared by PolytopeCalculationThread (single-image case) and SliceEvolutionThread
     (looping over many slices/time steps), so the S2/C2/etc. branching logic isn't
     duplicated between the two.
+
+    S2 is the periodic S2 (calculate_s2_periodic(), Torquato 2002 Sec. 12.5.1), scaled
+    with cal_fn(n=2); the same S2 is the denominator of the scaled C2 (C2/S2).
+    L, P3H, P3V, P4 and P6 come from calculate_polytopes_python().
     """
     raw_curves = {}
     scaled_curves = {}
 
-    if 's2' in selected_polytopes:
-        s2_values = calculate_s2(image_2d)
-        f2_values = cal_fn(s2_values, n=2)
+    # One periodic S2 (Torquato 2002, Sec. 12.5.1) serves both the S2 curve and the C2
+    # denominator: computed at most once, and both curves share one convention.
+    if 's2' in selected_polytopes or 'c2' in selected_polytopes:
+        s2_values = calculate_s2_periodic(image_2d)
         r_axis = np.arange(len(s2_values), dtype=np.float64)
+
+    if 's2' in selected_polytopes:
         raw_curves['s2'] = np.column_stack((r_axis, s2_values))
-        scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
+        scaled_curves['s2'] = np.column_stack((r_axis, cal_fn(s2_values, n=2)))
 
     if 'c2' in selected_polytopes:
         c2_values = calculate_c2(image_2d)
-        s2_periodic_values = calculate_s2_periodic(image_2d)
-        f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)
-        r_axis = np.arange(len(c2_values), dtype=np.float64)
+        f2_c2_values = scale_c2_by_connectedness(c2_values, s2_values)  # C2/S2 with the SAME S2 that is plotted
         raw_curves['c2'] = np.column_stack((r_axis, c2_values))
         scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
 
@@ -2003,22 +1987,26 @@ def compute_3d_polytope_curves(image_3d: np.ndarray, selected_polytopes: List[st
     Only s2/c2/L are supported in 3D (see PolytopeSettingsDialog.SUPPORT_3D) - any other
     name is silently ignored, same as compute_2d_polytope_curves does for unknown names
     it wasn't asked about.
+
+    All three use the same periodic convention: S2 from calculate_s2_periodic_3d()
+    (scaled with cal_fn(n=2), and the denominator of the scaled C2), C2 from
+    calculate_c2_3d(), L from calculate_L_3d() (scaled as L(r)/L(0)).
     """
     raw_curves = {}
     scaled_curves = {}
 
-    if 's2' in selected_polytopes:
-        s2_values = calculate_s2_3d(image_3d)
-        f2_values = cal_fn(s2_values, n=2)
+    # Same as the 2D helper: one periodic S2 for both the S2 curve and the C2 denominator.
+    if 's2' in selected_polytopes or 'c2' in selected_polytopes:
+        s2_values = calculate_s2_periodic_3d(image_3d)
         r_axis = np.arange(len(s2_values), dtype=np.float64)
+
+    if 's2' in selected_polytopes:
         raw_curves['s2'] = np.column_stack((r_axis, s2_values))
-        scaled_curves['s2'] = np.column_stack((r_axis, f2_values))
+        scaled_curves['s2'] = np.column_stack((r_axis, cal_fn(s2_values, n=2)))
 
     if 'c2' in selected_polytopes:
         c2_values = calculate_c2_3d(image_3d)
-        s2_periodic_values = calculate_s2_periodic_3d(image_3d)  # same periodic convention as C2, needed as the denominator
-        f2_c2_values = scale_c2_by_connectedness(c2_values, s2_periodic_values)
-        r_axis = np.arange(len(c2_values), dtype=np.float64)
+        f2_c2_values = scale_c2_by_connectedness(c2_values, s2_values)
         raw_curves['c2'] = np.column_stack((r_axis, c2_values))
         scaled_curves['c2'] = np.column_stack((r_axis, f2_c2_values))
 
@@ -2081,7 +2069,7 @@ def omega_n(curve_series: List[np.ndarray],
 
     Args:
         curve_series: list of per-slice/per-time curves - either all 1D arrays of raw
-            values (e.g. calculate_s2() output) or all 2D [r, value] arrays (e.g. from
+            values (e.g. calculate_s2_periodic() output) or all 2D [r, value] arrays (e.g. from
             calculate_polytopes_python()/compute_2d_polytope_curves()) - must all be the
             same shape. Entries that aren't arrays (e.g. a bare 0 for a skipped slice) are
             treated as all-zero curves.
@@ -2376,9 +2364,9 @@ def compute_chord_length_result(image: np.ndarray, phase: int = 1,
     Args:
         image: 2D or 3D array.
         phase: pixel value of the phase of interest. Only `1` is
-            supported right now - calculate_s2()/calculate_s2_3d() are
-            hardcoded to var=1 internally, so the S2-based estimate would
-            silently be wrong for any other phase. Raises ValueError
+            supported right now - calculate_s2_periodic()/calculate_s2_periodic_3d()
+            always measure the foreground (non-zero) phase, so the S2-based estimate
+            would silently be wrong for any other phase. Raises ValueError
             otherwise rather than returning an incorrect number.
         num_points, dr: passed to chord_length_from_S2().
         nbins: passed to chord_pdf().
@@ -2392,22 +2380,23 @@ def compute_chord_length_result(image: np.ndarray, phase: int = 1,
         'chords': raw chord lengths (np.ndarray), for CSV export
         'z', 'p_z': chord-length PDF bin centers / density
     """
-    # Guard rather than silently computing a wrong number: calculate_s2/calculate_s2_3d
-    # always measure phase 1 internally, so any other `phase` here would give an
+    # Guard rather than silently computing a wrong number: the periodic S2 functions
+    # always measure the foreground phase, so any other `phase` here would give an
     # ell_via_s2 that doesn't actually match the `phase` the caller asked for.
     if phase != 1:
         raise ValueError(
             "compute_chord_length_result only supports phase=1 (foreground) - "
-            "calculate_s2()/calculate_s2_3d() are hardcoded to var=1, so the "
+            "the S2 functions always measure the foreground phase, so the "
             "S2-based chord length would be wrong for any other phase."
         )
 
     # Pick the matching S2 function for the image's dimensionality - this is the
     # single place that dispatches 2D vs 3D, so callers (GUI threads) don't have to.
+    # Same periodic S2 as the polytope plots and REV/RES.
     if image.ndim == 2:
-        s2_phase = calculate_s2(image)
+        s2_phase = calculate_s2_periodic(image)
     elif image.ndim == 3:
-        s2_phase = calculate_s2_3d(image)
+        s2_phase = calculate_s2_periodic_3d(image)
     else:
         raise ValueError('compute_chord_length_result only supports 2D or 3D images.')
 
