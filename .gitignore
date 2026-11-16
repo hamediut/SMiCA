@@ -223,3 +223,7 @@ installer/redist/*.exe
 # SMiCA.spec is hand-tuned PyInstaller build config (not PyInstaller-generated
 # boilerplate, despite the generic *.spec rule above assuming that) - keep it tracked.
 !SMiCA.spec
+
+# Output of notebooks/SMiCA_standalone.ipynb (regenerated every time it is run)
+notebooks/demo_data/
+notebooks/results/
