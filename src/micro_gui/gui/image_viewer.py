@@ -18,7 +18,9 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PIL import Image
 
 from .widgets import ImageDisplayWidget
-from .save_dialog_helper import suggested_open_dir, remember_open_dir
+from .save_dialog_helper import (
+    suggested_open_dir, remember_open_dir, suggested_save_path, suggested_save_dir, remember_save_dir
+)
 from .rev_plot_window import RevPlotWindow
 from ..analysis.smds import (
     RES, REV,
@@ -49,7 +51,9 @@ from .minkowski_results_dialog import MinkowskiResultsDialog
 from .minkowski_evolution_settings_dialog import MinkowskiEvolutionSettingsDialog
 from .minkowski_evolution_plot_window import MinkowskiEvolutionPlotWindow
 
-from ..utils.image_utils import load_multipage_tif, long_path_safe
+from ..utils.image_utils import (
+    load_multipage_tif, long_path_safe, default_slice_names, save_tiff, save_tiff_sequence
+)
 
 #connected components
 from ..analysis.connected_components import (
@@ -712,6 +716,41 @@ class CropCenterThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+class SaveImageThread(QThread):
+    """
+    Thread that writes the current image to disk for File > Save As, so saving a large
+    volume (often several GB) doesn't freeze the UI, and the progress bar can move.
+
+    Two modes, picked by `file_names`:
+        - file_names is None: save ONE TIFF at `destination` (a file path) - a 2D image,
+          or a multi-page TIFF for a volume (see save_tiff in utils/image_utils.py).
+        - file_names is a list: save one TIFF per slice into `destination` (a folder),
+          slice z under file_names[z] (see save_tiff_sequence).
+    """
+
+    finished = Signal(str)       # Emits `destination` once everything is written
+    error = Signal(str)
+    progress = Signal(int, int)  # (completed, total) - pages or files written so far
+
+    def __init__(self, image_data: np.ndarray, destination: str, file_names: Optional[List[str]] = None):
+        super().__init__()
+        self.image_data = image_data
+        self.destination = destination
+        self.file_names = file_names
+
+    def run(self):
+        try:
+            if self.file_names is None:
+                save_tiff(self.destination, self.image_data, progress_callback=self.progress.emit)
+            else:
+                save_tiff_sequence(
+                    self.destination, self.image_data, self.file_names,
+                    progress_callback=self.progress.emit,
+                )
+            self.finished.emit(self.destination)
+        except Exception as e:
+            self.error.emit(str(e))
+
 class ImageViewer(QMainWindow):
     """
     Main window for the Micro_GUI image viewer application.
@@ -740,6 +779,12 @@ class ImageViewer(QMainWindow):
         # Real step/time numbers per slice, from a folder import's filenames (e.g. [0, 5, 12, 20]).
         # None for anything without associated filenames (opened tif, native 3D volume).
         self.stack_labels: Optional[list] = None
+        # One file name per slice along axis 0 (Z for a volume, T for a 2D time series),
+        # used as the default names by File > Save As > Image Sequence. Either the original
+        # slice files' names (folder imports) or "<name>_0000.tif", ... for a volume opened
+        # from one multi-page TIFF. Cropping keeps the names of the slices it keeps, so each
+        # saved slice still carries its original slice number. None for 2D and 4D data.
+        self.slice_file_names: Optional[List[str]] = None
         #connected coponents results
         self.cc_labels_data: Optional[np.ndarray] = None # label volume from the last connected-components run
         self.cc_result: Optional[dict] = None # dict from connected_components_2d/_3d() with all the measurements
@@ -763,6 +808,8 @@ class ImageViewer(QMainWindow):
         self.crop_center_dialog: Optional[CropCenterDialog] = None
         self.crop_thread: Optional[CropCenterThread] = None
 
+        # File > Save As: the background thread writing the image to disk, if any.
+        self.save_thread: Optional[SaveImageThread] = None
 
         # Initialize UI components
         self._setup_ui()
@@ -853,6 +900,25 @@ class ImageViewer(QMainWindow):
             "or a full 3D volume; large 3D-volume datasets can use \n low-memory mode to avoid "
             "loading everything at once")
         import_timeseries_action.triggered.connect(self.open_import_time_series_dialog)
+
+        file_menu.addSeparator()
+
+        # Save As submenu - saves whatever is in the viewer now, including the result of
+        # Binarize, Crop Center or a connected-components filter.
+        save_as_menu = file_menu.addMenu("Save &As")
+
+        save_sequence_action = save_as_menu.addAction("Image &Sequence (one TIFF per slice)...")
+        save_sequence_action.setStatusTip(
+            "Save every slice of the current 3D volume as its own TIFF file in a folder, "
+            "named after the original slices")
+        save_sequence_action.triggered.connect(self.save_as_image_sequence)
+
+        save_single_action = save_as_menu.addAction("Single &Image (TIFF, 2D or 3D)...")
+        save_single_action.setStatusTip(
+            "Save the current image as one TIFF file - a multi-page TIFF for a 3D volume")
+        save_single_action.triggered.connect(self.save_as_single_image)
+
+        file_menu.addSeparator()
 
         exit_action = file_menu.addAction("E&xit")
         exit_action.setShortcut("Ctrl+Q")
@@ -1172,7 +1238,7 @@ class ImageViewer(QMainWindow):
                 self.status_bar.showMessage(f"Error: {str(e)}")
 
     def _finalize_loaded_image(self, image_data: np.ndarray, source_label: str, data_mode: str, stack_labels=None,
-                               warn_if_not_binary: bool = True):
+                               warn_if_not_binary: bool = True, slice_file_names: Optional[List[str]] = None):
 
         """
         Shared tail-end of loading any image (single file or imported sequence): validates
@@ -1187,6 +1253,12 @@ class ImageViewer(QMainWindow):
         warn_if_not_binary=False skips the "Binarization Required" pop-up - used when the
         image is replaced by a processed version of itself (e.g. a crop), where the user
         already saw that warning when the original was loaded.
+
+        slice_file_names: one file name per slice along axis 0, used as the default names
+        by File > Save As > Image Sequence. Folder imports pass the original slice files'
+        names. Left as None, a 3D array gets "<source_label without extension>_0000.tif",
+        ... instead (e.g. a volume opened from one multi-page TIFF); 2D and 4D data get
+        None, since they can't be saved as a sequence.
         """
 
         # Normalise shapes that are really 2D but arrive with a third axis,
@@ -1220,6 +1292,17 @@ class ImageViewer(QMainWindow):
         self.current_time_index = 0
         self.data_mode = data_mode
         self.stack_labels = stack_labels
+
+        # Default names for saving as an image sequence. Checked against the shape AFTER the
+        # normalisation above: e.g. a 1-file folder import arrives as (1, H, W) but is
+        # displayed (and saved) as a 2D image, so its single name no longer applies.
+        if image_data.ndim != 3:
+            self.slice_file_names = None
+        elif slice_file_names is not None and len(slice_file_names) == image_data.shape[0]:
+            self.slice_file_names = list(slice_file_names)
+        else:
+            stem = os.path.splitext(source_label)[0]
+            self.slice_file_names = default_slice_names(stem, image_data.shape[0])
 
         # A connected-components result belongs to the OLD image - reset it here so it
         # doesn't linger and get wrongly displayed over unrelated new data.
@@ -1311,8 +1394,9 @@ class ImageViewer(QMainWindow):
         
         # file_paths =  dialog.get_sorted_file_paths()
 
+        file_paths = dialog.get_sorted_file_paths()
         try:
-            image_data = self._load_and_stack_2d_files(dialog.get_sorted_file_paths())
+            image_data = self._load_and_stack_2d_files(file_paths)
             # slices = [np.array(Image.open(p)) for p in file_paths]
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load slice images:\n{str(e)}")
@@ -1325,7 +1409,11 @@ class ImageViewer(QMainWindow):
         
         # image_data = np.stack(slices, axis=0)
         self.current_file_path = dialog.folder_path
-        self._finalize_loaded_image(image_data, os.path.basename(dialog.folder_path), data_mode='3d_volume')
+        self._finalize_loaded_image(
+            image_data, os.path.basename(dialog.folder_path), data_mode='3d_volume',
+            # the original slice files' names, so Save As > Image Sequence reuses them
+            slice_file_names=[os.path.basename(p) for p in file_paths],
+        )
 
 
     def _load_multipage_tif(self, file_path):
@@ -1344,6 +1432,7 @@ class ImageViewer(QMainWindow):
         # Reset here (not just set below) so a PREVIOUS streaming import's file paths can
         # never leak into a differently-loaded dataset opened via this same method.
         self.current_volume_file_paths = None
+        slice_file_names = None  # only set for 2D time steps, the one case that is a 3D (T, Y, X) stack
         try:
             if dialog.get_is_3d_files() and dialog.get_low_memory_mode():
                 # Streaming mode: don't load every volume - remember the file paths (used by
@@ -1361,6 +1450,7 @@ class ImageViewer(QMainWindow):
             else:
                 image_data = self._load_and_stack_2d_files(dialog.get_sorted_file_paths())
                 data_mode = 'time_series'
+                slice_file_names = [os.path.basename(p) for p in dialog.get_sorted_file_paths()]
 
 
         except Exception as e:
@@ -1374,9 +1464,186 @@ class ImageViewer(QMainWindow):
         self._finalize_loaded_image(
             image_data, os.path.basename(dialog.folder_path), data_mode = data_mode,
             stack_labels=dialog.get_sorted_values(),
+            slice_file_names=slice_file_names,
         )
 
-    
+    # ----------------------------------------------------------------------------------
+    # File > Save As
+    # ----------------------------------------------------------------------------------
+
+    def _can_save_current_image(self) -> bool:
+        """
+        Checks shared by both Save As options. Shows a message and returns False if the
+        current image can't be saved right now.
+        """
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return False
+
+        # 4D data is a stack of volumes - one TIFF per slice doesn't map onto it, and in
+        # low-memory mode only the first volume is even in memory.
+        if self.data_mode in ('4d_time_series', '4d_time_series_streaming'):
+            QMessageBox.information(
+                self, "Save Not Available",
+                "Saving is available for 2D images, 3D volumes and time series of 2D images.\n\n"
+                "4D time series (a 3D volume per step) can't be saved yet."
+            )
+            return False
+
+        # Replacing self.save_thread while it is still writing would destroy a running
+        # QThread, which crashes the application.
+        if self.save_thread is not None and self.save_thread.isRunning():
+            QMessageBox.information(
+                self, "Save in Progress",
+                "The image is still being saved - please wait for it to finish."
+            )
+            return False
+
+        return True
+
+    def _default_save_stem(self) -> str:
+        """
+        Name (without extension) suggested when saving the image as a single file: the
+        opened file's name, or the folder's name for a folder import.
+        """
+        if not self.current_file_path:
+            return "image"
+        name = os.path.basename(os.path.normpath(self.current_file_path))
+        if os.path.isdir(self.current_file_path):
+            return name                      # a folder: "scan.v2" is a name, not an extension
+        return os.path.splitext(name)[0]     # a file: drop ".tif"
+
+    def save_as_single_image(self):
+        """
+        File > Save As > Single Image: save the current image as ONE TIFF file - a plain
+        TIFF for a 2D image, a multi-page TIFF (one page per slice) for a 3D volume.
+        """
+        if not self._can_save_current_image():
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Image As Single TIFF",
+            suggested_save_path(f"{self._default_save_stem()}.tif"),  # opens in the last save folder
+            "TIFF Files (*.tif *.tiff)"
+        )
+        if not file_path:
+            return  # cancelled
+
+        # Make sure the file actually ends up as a TIFF, even if the user typed another
+        # extension (or none) - the content is always TIFF.
+        if not file_path.lower().endswith(('.tif', '.tiff')):
+            file_path += ".tif"
+
+        # (QFileDialog has already asked the user to confirm overwriting an existing file.)
+        self._start_save_thread(file_path, file_names=None)
+
+    def save_as_image_sequence(self):
+        """
+        File > Save As > Image Sequence: save every slice of the current 3D array as its
+        own TIFF file in a folder the user picks.
+
+        Each slice is saved under its name from self.slice_file_names: the original slice
+        file's name for a folder import (so the slice number in it is kept, also after a
+        crop), or "<name>_0000.tif", ... for a volume opened from one multi-page TIFF.
+        """
+        if not self._can_save_current_image():
+            return
+
+        if self.current_image_data.ndim != 3 or self.slice_file_names is None:
+            QMessageBox.information(
+                self, "Not a Volume",
+                "A 2D image has only one slice - use File > Save As > Single Image instead."
+            )
+            return
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder to Save the Image Sequence In", suggested_save_dir()
+        )
+        if not folder:
+            return  # cancelled
+
+        file_names = list(self.slice_file_names)
+
+        # Unlike a file dialog, a folder dialog doesn't warn about overwriting - and saving
+        # into the folder the slices were imported from would replace the original files.
+        existing = [name for name in file_names if os.path.exists(os.path.join(folder, name))]
+        if existing:
+            reply = QMessageBox.question(
+                self,
+                "Overwrite Files?",
+                f"{len(existing)} of the {len(file_names)} slice files already exist in:\n"
+                f"{folder}\n\n"
+                f"e.g. {existing[0]}\n\n"
+                "Overwrite them?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,  # default button: don't overwrite
+            )
+            if reply != QMessageBox.Yes:
+                self.status_bar.showMessage("Save cancelled - no files were written")
+                return
+
+        self._start_save_thread(folder, file_names=file_names)
+
+    def _start_save_thread(self, destination: str, file_names: Optional[List[str]]):
+        """
+        Write the current image in the background (see SaveImageThread). `destination` is
+        a file path when file_names is None, otherwise the folder for the slice files.
+        """
+        # Qt's file dialogs return "/" separators even on Windows; normpath gives the usual
+        # "D:\data\out" form, so the status message doesn't mix "/" and "\".
+        destination = os.path.normpath(destination)
+
+        image = self.current_image_data
+        total = image.shape[0] if image.ndim == 3 else 1   # pages / files to write
+
+        # Determinate progress bar, driven by the shared on_evolution_progress handler,
+        # which also shows the estimated remaining time in the status bar.
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(0)
+        self._evolution_start_time = time.perf_counter()
+        self._evolution_description = "Saving image sequence" if file_names is not None else "Saving TIFF"
+        self.status_bar.showMessage(f"{self._evolution_description}: 0/{total}")
+
+        # The thread keeps its own reference to the array, so it writes exactly what was
+        # shown when Save was chosen, even if the user binarizes or crops in the meantime
+        # (those make a new array rather than changing this one).
+        self.save_thread = SaveImageThread(image, destination, file_names)
+        self.save_thread.progress.connect(self.on_evolution_progress)
+        self.save_thread.finished.connect(self.on_save_finished)
+        self.save_thread.error.connect(self.on_save_error)
+        self.save_thread.start()
+
+    def on_save_finished(self, destination: str):
+        """Saving is done - report it in the status bar (no pop-up, to keep saving quick)."""
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)  # restore indeterminate default for other calculations
+
+        file_names = self.save_thread.file_names
+        # The thread object stays around on self; drop its reference so the saved array
+        # can be freed once the viewer moves on to another image.
+        self.save_thread.image_data = None
+
+        if file_names is None:
+            remember_save_dir(destination)  # so the next Save dialog opens in this same folder
+            self.status_bar.showMessage(f"Saved: {destination}")
+        else:
+            # remember_save_dir() expects a file path and keeps its folder
+            remember_save_dir(os.path.join(destination, file_names[0]))
+            self.status_bar.showMessage(
+                f"Saved {len(file_names)} slices ({file_names[0]} ... {file_names[-1]}) to: {destination}"
+            )
+
+    def on_save_error(self, error_msg: str):
+        """Saving failed (e.g. no write permission, or the disk is full)."""
+        self.save_thread.image_data = None  # same reason as in on_save_finished
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)
+        QMessageBox.critical(self, "Save Error", f"Failed to save the image:\n{error_msg}")
+        self.status_bar.showMessage(f"Error: {error_msg}")
+
+
     def open_binarize_dialog(self):
         """Open the binarize dialog and apply the chosen foreground value to the current image.
         (non-modal, so the user can still hover the image to check pixel values)
@@ -1602,12 +1869,19 @@ class ImageViewer(QMainWindow):
         base_name = os.path.basename(self.current_file_path) if self.current_file_path else "image"
         source_label = f"{base_name} (center crop)"
 
+        # Keep the names of the slices that survive the crop, so a later Save As > Image
+        # Sequence still writes e.g. "rock_0250.tif" for what was slice 250 before cropping.
+        slice_file_names = None
+        if cropped.ndim == 3 and self.slice_file_names is not None:
+            slice_file_names = self.slice_file_names[box.z_start:box.z_stop]
+
         # Reuse the normal "new image loaded" path: it resets the sliders, the display range,
         # any connected-components result (its labels no longer line up with the cropped
         # image) and the window title. data_mode stays the same - a cropped 3D volume is
         # still a 3D volume.
         self._finalize_loaded_image(
-            cropped, source_label, data_mode=self.data_mode, warn_if_not_binary=False
+            cropped, source_label, data_mode=self.data_mode, warn_if_not_binary=False,
+            slice_file_names=slice_file_names,
         )
 
         depth, height, width = box.size_zyx
@@ -2505,7 +2779,8 @@ class ImageViewer(QMainWindow):
 
     def on_evolution_progress(self, current: int, total: int):
         """Shared progress handler for every evolution-style calculation (Minkowski, SMD,
-        chord length - streaming or not), and for the slice-by-slice center-crop search.
+        chord length - streaming or not), for the slice-by-slice center-crop search, and
+        for File > Save As (pages / files written).
         Each thread's `progress` signal connects here;
         self._evolution_description (set right before that thread starts) says which
         calculation is actually running."""

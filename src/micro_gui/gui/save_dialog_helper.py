@@ -29,6 +29,15 @@ def suggested_save_path(default_filename: str) -> str:
     return default_filename
 
 
+def suggested_save_dir() -> str:
+    """
+    The folder to hand to QFileDialog.getExistingDirectory() when the user picks a folder to
+    save INTO (e.g. File > Save As > Image Sequence): the last remembered save folder, or ""
+    (the working directory) before anything has been saved yet.
+    """
+    return QSettings().value(_SETTINGS_KEY, "")
+
+
 def remember_save_dir(file_path: str) -> None:
     """Call this after a successful save, so the NEXT Save dialog starts in the same folder."""
     folder = os.path.dirname(file_path)
