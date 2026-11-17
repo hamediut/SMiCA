@@ -13,6 +13,7 @@ from src.micro_gui.analysis.smds import (
     calculate_c2,
     calculate_polytopes_python,
     compute_2d_polytope_curves,
+    average_curve_series,
 )
 
 
@@ -199,6 +200,32 @@ class TestNonSquare2D:
         expected = np.full(4, 13 / (2 * 8 * 13))
         expected[0] = (13 + 13) / (2 * 8 * 13)
         np.testing.assert_allclose(raw['L'][:, 1], expected, atol=1e-12)
+
+
+class TestAverageCurveSeries:
+    """Average of one function's curves over slices (the slice evolution "Average" tab)."""
+
+    def test_mean_per_r_skipping_nan(self):
+        """Mean point by point in r; a NaN on one slice is skipped, all-NaN stays NaN."""
+        r = np.arange(3.0)
+        slice_a = np.column_stack((r, [1.0, 2.0, np.nan]))
+        slice_b = np.column_stack((r, [3.0, 4.0, np.nan]))
+        slice_c = np.column_stack((r, [5.0, np.nan, np.nan]))
+        average = average_curve_series([slice_a, slice_b, slice_c])
+        np.testing.assert_array_equal(average[:, 0], r)
+        np.testing.assert_allclose(average[:2, 1], [3.0, 3.0])  # r=1: mean of 2 and 4 only
+        assert np.isnan(average[2, 1])
+
+    def test_average_of_slices_matches_mean_of_curves(self):
+        """On real per-slice SMD curves, the average equals the plain mean over slices."""
+        rng = np.random.default_rng(1)
+        volume = rng.integers(0, 2, size=(4, 21, 30), dtype=np.uint8)  # 4 non-square slices
+        raws = [compute_2d_polytope_curves(s, ['s2', 'p4'])[0] for s in volume]
+        for name in ('s2', 'p4'):
+            average = average_curve_series([raw[name] for raw in raws])
+            expected = np.mean([raw[name][:, 1] for raw in raws], axis=0)
+            np.testing.assert_allclose(average[:, 1], expected)
+            assert average.shape == (10, 2)  # min(21, 30) // 2 points
 
 
 if __name__ == '__main__':

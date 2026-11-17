@@ -1821,9 +1821,9 @@ class ImageViewer(QMainWindow):
         # Just controls wording in the dialog/plot titles - "Slice" for a real 3D volume,
         # "Time step" for an imported time series (2D or 3D-per-step). The underlying calculation is identical either way.
 
-        axis_label = ("time step" if self.data_mode in
-                      ('time_series', '4d_time_series', '4d_time_series_streaming') else "slice")
-        
+        is_time_series = self.data_mode in ('time_series', '4d_time_series', '4d_time_series_streaming')
+        axis_label = "time step" if is_time_series else "slice"
+
         streaming = self.data_mode == '4d_time_series_streaming'
         if streaming:
             n_slices = len(self.current_volume_file_paths)
@@ -1854,6 +1854,9 @@ class ImageViewer(QMainWindow):
         self._evolution_axis_label = axis_label
         # Same idea for the r-axis unit: each slice/time step is a 3D volume (voxels) or a 2D image (pixels)
         self._evolution_is_3d = is_3d
+        # "Average" results tab only for the Z-slices of one 3D volume: the mean over slices
+        # estimates the volume's 2D statistics, while a mean over time steps would mix states
+        self._evolution_show_average = not is_time_series
 
         if streaming:
             self.evolution_thread = SliceEvolutionStreamingThread(
@@ -1890,6 +1893,7 @@ class ImageViewer(QMainWindow):
             slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict,
             axis_label=self._evolution_axis_label, parent=self,
             ndim=3 if self._evolution_is_3d else 2,
+            show_average=self._evolution_show_average,
         )
         self.plot_windows.append(window)
         window.show()

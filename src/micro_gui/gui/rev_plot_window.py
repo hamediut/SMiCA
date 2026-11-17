@@ -11,7 +11,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
-from .plot_style import figure_size, r_axis_label, save_figure
+from .plot_style import figure_size, mark_phase_fraction, r_axis_label, save_figure
 
 
 class RevPlotWindow(QMainWindow):
@@ -72,6 +72,9 @@ class RevPlotWindow(QMainWindow):
             else:
                 # subvolumes are Dataframes with mean and std
                 self.ax_s2.plot(self.s2_dict[key]['s2']['mean'], label = f'Size {key.split("_")[1]}')
+
+        # phase fraction of the whole image: S2(0) of the 'original' curve (F2 starts at 1, no marker there)
+        mark_phase_fraction(self.ax_s2, self.s2_dict['original'][0])
 
         # font sizes come from the shared style in plot_style.py
         self.ax_s2.set_xlabel(r_axis_label(self.ndim))

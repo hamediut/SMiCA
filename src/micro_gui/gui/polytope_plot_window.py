@@ -12,7 +12,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
-from .plot_style import figure_size, r_axis_label, save_figure
+from .plot_style import curve_style, figure_size, mark_phase_fraction, r_axis_label, save_figure
 
 
 class PolytopePlotWindow(QMainWindow):
@@ -78,7 +78,11 @@ class PolytopePlotWindow(QMainWindow):
                 # For the two triangle functions, plot them every other points as it is zero for every other point, so the line is not continuous and looks weird. This is a temporary fix until we can figure out how to fix the calculation of these two functions.
                 self.ax_raw.plot(curve[::2, 0], curve[::2, 1], label=name.upper())
             else:
-                self.ax_raw.plot(curve[:, 0], curve[:, 1], label=name.upper())
+                # curve_style: S2 wider and underneath, so it stays visible when C2 = S2
+                self.ax_raw.plot(curve[:, 0], curve[:, 1], label=name.upper(), **curve_style(name))
+
+         # every raw curve starts at the phase fraction, so any curve's r=0 value is phi
+         mark_phase_fraction(self.ax_raw, next(iter(self.raw_curves.values()))[0, 1])
 
          # font sizes and line widths come from the shared style in plot_style.py
          self.ax_raw.set_title('Polytope Functions (raw)')
@@ -98,7 +102,7 @@ class PolytopePlotWindow(QMainWindow):
                 # For the two triangle functions, plot them every other points as it is zero for every other point, so the line is not continuous and looks weird. This is a temporary fix until we can figure out how to fix the calculation of these two functions.
                 self.ax_scaled.plot(curve[::2, 0], curve[::2, 1], label=name.upper())
             else:
-                self.ax_scaled.plot(curve[:, 0], curve[:, 1], label=name.upper())
+                self.ax_scaled.plot(curve[:, 0], curve[:, 1], label=name.upper(), **curve_style(name))
 
         self.ax_scaled.set_title('Polytope Functions (scaled)')
         self.ax_scaled.set_xlabel(r_axis_label(self.ndim))

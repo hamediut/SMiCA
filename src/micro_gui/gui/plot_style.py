@@ -45,6 +45,36 @@ PAPER_STYLE = {
 
 matplotlib.rcParams.update(PAPER_STYLE)
 
+# Per-function line style in plots that show several SMDs together. When the phase is one
+# big connected cluster, C2 = S2 and the two curves lie exactly on top of each other: S2 is
+# therefore drawn twice as wide and underneath every other curve (zorder below the default
+# 2), so it shows as a border on both sides of the C2 line drawn on top of it.
+CURVE_STYLES = {
+    's2': {'linewidth': 4.0, 'zorder': 1.9},
+}
+
+
+def curve_style(name: str) -> dict:
+    """Extra plot() keyword arguments for one SMD curve, e.g. ax.plot(r, y, **curve_style('s2')).
+    Empty for functions without a special style, so they keep the shared defaults."""
+    return dict(CURVE_STYLES.get(name, {}))
+
+
+def mark_phase_fraction(ax, phi: float) -> None:
+    """
+    Black circle at (r = 0, phi) on a RAW P_n(r) plot. Every raw SMD (S2, C2, L, P3, P4, P6)
+    starts at the phase fraction phi - at r = 0 all its points sit on the same pixel - so
+    this highlights the porosity. It gets no legend entry. Not for the scaled f_n(r) curves,
+    which always start at 1.
+
+    Used only on plots of ONE 2D image or ONE 3D volume (polytope results, RES/REV S2, the S2
+    window) - not in the slice/time evolution window, where every slice would add a marker.
+    """
+    ax.plot([0], [phi], linestyle='none', marker='o', markersize=8, color='black',
+            zorder=3,        # on top of every curve, including the wide S2 line
+            clip_on=False,   # never cut off by the edge of the axes
+            label='_nolegend_')
+
 
 def figure_size(n_panels: int = 1):
     """Saved size, in inches, of a figure with n_panels panels side by side."""

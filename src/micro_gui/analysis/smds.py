@@ -7,6 +7,7 @@ and SMDS values for binary microstructure images in 2D and 3D.
 import os
 import math
 import shutil
+import warnings
 import subprocess
 from glob import glob
 import numpy as np
@@ -228,12 +229,21 @@ def cal_fn( polytope:np.ndarray, n:int)->np.ndarray:
     sampled r - a tail above 0 means the structure is still correlated at that distance,
     and small negative values around 0 are normal sampling noise.
 
+    If the phase is absent (phi = 0) or fills the whole image (phi = 1) - e.g. an empty
+    slice at the end of a stack, a small RES/REV crop that falls inside one phase, or an
+    image that was not binarized (every non-zero label counts as the phase, so phi = 1) -
+    there is no two-phase structure and f_n is undefined (0/0): the result is all NaN,
+    returned without a RuntimeWarning.
+
     polytope: raw Pn curve, e.g. S2 or a higher-order polytope function (P3H, P3V, P4, P6).
     n: number of vertices of the polytope - 2 for S2, 3 for P3H/P3V, 4 for P4, 6 for P6."""
-    numerator = polytope - polytope[0] ** n
-    denominator = polytope[0] - polytope[0] ** n
-    fn_r = numerator/ denominator
-    return fn_r
+    phi = polytope[0]
+    denominator = phi - phi ** n
+    if denominator == 0:
+        # phi = 0 or 1: undefined at EVERY r (see above) - all NaN, also at the always-0
+        # odd-r entries of P3H/P3V, which would otherwise come out as -inf
+        return np.full(np.shape(polytope), np.nan)
+    return (polytope - phi ** n) / denominator
 
 def calculate_s2_4d(images: np.ndarray):
     """
@@ -1800,7 +1810,12 @@ def scale_by_initial_value(values: np.ndarray) -> np.ndarray:
     large r for any structure that isn't 100% foreground (an entire segment of length r
     lying inside the phase becomes impossible once r exceeds the longest chord). So f(0) = 1
     and f(r) -> 0, the same visual convention as the other scaled curves.
+
+    If the phase is absent (L(0) = phi = 0), the result is all NaN (0/0), returned without a
+    RuntimeWarning - the same convention as cal_fn().
     """
+    if values[0] == 0:
+        return np.full(np.shape(values), np.nan)
     return values / values[0]
 
 
@@ -2119,6 +2134,32 @@ def delta_omega(curve_series: List[np.ndarray],
         omega_values.append(omega / n_r)
 
     return np.array(omega_values)
+
+
+def average_curve_series(curve_series: List[np.ndarray]) -> np.ndarray:
+    """
+    Average one function's curves over a series of slices, point by point in r - e.g. the
+    S2 of every Z-slice of a volume -> one mean S2 curve (the "Average" tab of the slice
+    evolution results).
+
+    Args:
+        curve_series: the [r, value] arrays of one function, one per slice, all with the
+            same r axis (same convention as omega_n()).
+
+    Returns:
+        One [r, mean value] array with the same r axis. NaN values (e.g. the scaled C2 =
+        C2/S2 at an r where S2 = 0 on some slice) are skipped, so the mean at that r is
+        over the slices where the value is defined; it is NaN only if no slice has a value.
+    """
+    if not curve_series:
+        raise ValueError('curve_series must not be empty.')
+
+    curves = np.stack(curve_series)  # shape (n_slices, Nr, 2)
+    with warnings.catch_warnings():
+        # an r with no defined value on any slice -> NaN, which is expected, so no warning
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        mean_values = np.nanmean(curves[:, :, 1], axis=0)
+    return np.column_stack((curves[0, :, 0], mean_values))
 
 
 # ==============================================================
