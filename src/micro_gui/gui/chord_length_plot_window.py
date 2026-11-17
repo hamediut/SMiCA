@@ -10,6 +10,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
+from .plot_style import figure_size, save_figure
 
 class ChordLengthPlotWindow(QMainWindow):
     """
@@ -42,7 +43,7 @@ class ChordLengthPlotWindow(QMainWindow):
         # self.fig/self.ax stored as attributes (not local vars) so save_plot() can reach
         # back into this exact figure later - same reason RevPlotWindow does it.
 
-        self.fig, self.ax = plt.subplots(figsize = (8, 6))
+        self.fig, self.ax = plt.subplots(figsize=figure_size())
 
         z = self.result['z']
         p_z = self.result['p_z']
@@ -58,10 +59,10 @@ class ChordLengthPlotWindow(QMainWindow):
                          label=f"direct = {self.result['ell_direct']:.2f}")
 
         unit = 'pixels' if self.result['ndim'] == 2 else 'voxels'
-        self.ax.set_xlabel(f'Chord length ({unit})', fontsize=14)
-        self.ax.set_ylabel('p(z)', fontsize=14)
-        self.ax.set_title(f"Chord Length Distribution (phase={self.result['phase']})",
-                           fontsize=14, fontweight='bold')
+        # font sizes come from the shared style in plot_style.py
+        self.ax.set_xlabel(f'Chord length ({unit})')
+        self.ax.set_ylabel('$p(z)$')
+        self.ax.set_title(f"Chord Length Distribution (phase={self.result['phase']})")
         self.ax.legend()
         self.ax.grid(True, alpha=0.3)
 
@@ -96,7 +97,7 @@ class ChordLengthPlotWindow(QMainWindow):
         if file_path:
 
             try:
-                self.fig.savefig(file_path, dpi = 500, bbox_inches='tight')
+                save_figure(self.fig, file_path)
                 remember_save_dir(file_path) # so the next Save dialog opens in this same folder
                 QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:

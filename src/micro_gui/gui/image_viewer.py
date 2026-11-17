@@ -1793,7 +1793,9 @@ class ImageViewer(QMainWindow):
         # QMessageBox.information(self, "Polytope Calculation Done", f"Computed:\n{summary}")
 
         # Create a new window to display the polytope plots
-        polytope_window = PolytopePlotWindow(raw_curves, scaled_curves, self)
+        # ndim of the data the thread actually computed on (2D image or 3D volume) -> r axis in pixels or voxels
+        polytope_window = PolytopePlotWindow(raw_curves, scaled_curves, self,
+                                             ndim=self.polytope_thread.image_data.ndim)
         self.plot_windows.append(polytope_window)
         polytope_window.show()
 
@@ -1850,6 +1852,8 @@ class ImageViewer(QMainWindow):
         # it only gets the thread's signal arguments, not the dialog itself
 
         self._evolution_axis_label = axis_label
+        # Same idea for the r-axis unit: each slice/time step is a 3D volume (voxels) or a 2D image (pixels)
+        self._evolution_is_3d = is_3d
 
         if streaming:
             self.evolution_thread = SliceEvolutionStreamingThread(
@@ -1884,7 +1888,8 @@ class ImageViewer(QMainWindow):
 
         window = SliceEvolutionPlotWindow(
             slice_indices, raw_curves_list, scaled_curves_list, omega_dict, delta_omega_dict,
-            axis_label=self._evolution_axis_label, parent=self
+            axis_label=self._evolution_axis_label, parent=self,
+            ndim=3 if self._evolution_is_3d else 2,
         )
         self.plot_windows.append(window)
         window.show()

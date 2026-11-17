@@ -11,6 +11,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
+from .plot_style import figure_size, r_axis_label, save_figure
 
 
 class RevPlotWindow(QMainWindow):
@@ -29,6 +30,8 @@ class RevPlotWindow(QMainWindow):
         self.s2_dict = s2_dict
         self.f2_dict = f2_dict
         self.calc_type = calc_type
+        # RES is always computed on a 2D image, REV on a 3D volume (see REVCalculationThread)
+        self.ndim = 2 if calc_type == 'RES' else 3
 
         # Create tab widget to show S2 and F2 separately
         self.tabs = QTabWidget() # we add self.tabs to access it later to check which tab is currently active
@@ -57,22 +60,23 @@ class RevPlotWindow(QMainWindow):
     def _create_s2_plot(self):
         """ Create the S2 correlation plot."""
 
-        self.fig_s2, self.ax_s2 = plt.subplots(figsize=(10, 6))
+        self.fig_s2, self.ax_s2 = plt.subplots(figsize=figure_size())
 
         # plot each subvolume size
         for key, value in self.s2_dict.items():
 
             if key == 'original':
-                self.ax_s2.plot(value, linewidth = 2, color = 'black', label = 'Original')
+                # thicker than the default line width (shared style) so the whole image stands out
+                self.ax_s2.plot(value, linewidth = 3, color = 'black', label = 'Original')
 
             else:
                 # subvolumes are Dataframes with mean and std
-                self.ax_s2.plot(self.s2_dict[key]['s2']['mean'], linewidth = 1.5, label = f'Size {key.split("_")[1]}')
-        
-        self.ax_s2.set_xlabel('Distance (r)', fontsize=16)
-        self.ax_s2.set_ylabel('$S_2$', fontsize=16)
-        self.ax_s2.tick_params(axis='both', which='major', labelsize=12)
-        self.ax_s2.set_title(f'{self.calc_type} Analysis - S2', fontsize=14, fontweight='bold')
+                self.ax_s2.plot(self.s2_dict[key]['s2']['mean'], label = f'Size {key.split("_")[1]}')
+
+        # font sizes come from the shared style in plot_style.py
+        self.ax_s2.set_xlabel(r_axis_label(self.ndim))
+        self.ax_s2.set_ylabel('$S_2$')
+        self.ax_s2.set_title(f'{self.calc_type} Analysis - S2')
         self.ax_s2.legend()
         self.ax_s2.grid(True, alpha=0.3)
         
@@ -80,20 +84,19 @@ class RevPlotWindow(QMainWindow):
 
     def _create_f2_plot(self):
         """Create the F2 autocovariance plot."""
-        self.fig_f2, self.ax_f2 = plt.subplots(figsize=(10, 6))
-        
+        self.fig_f2, self.ax_f2 = plt.subplots(figsize=figure_size())
+
         # Plot each subvolume size
         for key, value in self.f2_dict.items():
             if key == 'original':
-                self.ax_f2.plot(value, linewidth=2, color='black', label='Original')
+                self.ax_f2.plot(value, linewidth=3, color='black', label='Original')
             else:
                 # Subvolumes are DataFrames with mean and std
-                self.ax_f2.plot(self.f2_dict[key]['f2']['mean'], linewidth=1.5, label=f'Size {key.split("_")[1]}')
-        
-        self.ax_f2.set_xlabel('Distance (r)', fontsize=16)
-        self.ax_f2.set_ylabel('$F_2$', fontsize=16)
-        self.ax_f2.tick_params(axis='both', which='major', labelsize=12)
-        self.ax_f2.set_title('REV Analysis - F2', fontsize=14, fontweight='bold')
+                self.ax_f2.plot(self.f2_dict[key]['f2']['mean'], label=f'Size {key.split("_")[1]}')
+
+        self.ax_f2.set_xlabel(r_axis_label(self.ndim))
+        self.ax_f2.set_ylabel('$F_2$')
+        self.ax_f2.set_title(f'{self.calc_type} Analysis - F2')
         self.ax_f2.legend()
         self.ax_f2.grid(True, alpha=0.3)
         
@@ -146,7 +149,7 @@ class RevPlotWindow(QMainWindow):
 
         if file_path: # If user didn't cancel and selected a file path
             try:
-                current_fig.savefig(file_path, dpi=300, bbox_inches='tight')
+                save_figure(current_fig, file_path)
                 remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
                 QMessageBox.information(self, "Success", f"{plot_name} plot saved to:\n{file_path}")
             except Exception as e:

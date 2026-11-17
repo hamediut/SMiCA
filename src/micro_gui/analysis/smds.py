@@ -927,7 +927,7 @@ def calculate_polytopes(images, par, outputPn, cpathPn, runtimePn, polytope= 's2
 
 ###---------------------two-point cluster function C2 (periodic, no GooseEYE dependency)------------------------
 #
-# A from-scratch reimplementation of GooseEYE's clusters()/C2() for a single square 2D binary image, so users
+# A from-scratch reimplementation of GooseEYE's clusters()/C2() for a single 2D binary image (need not be square), so users
 # don't need to install GooseEYE (not on PyPI - conda-forge only, a compiled package - exactly the install
 # friction this avoids). Matches GooseEYE's documented definition:
 #     C2(dx) = P{cluster(x) = cluster(x+dx) != 0}
@@ -1003,36 +1003,43 @@ def _label_clusters_periodic(binary_image: np.ndarray) -> np.ndarray:
 
 
 @jit(nopython=True)
-def _cluster_line_pair_counts(labels_line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+def _cluster_line_pair_counts(labels_line: np.ndarray, n: int, nt: int) -> np.ndarray:
     """
     For one periodic 1D line of cluster labels (a row or column), count for each distance
-    r = 0..nt-1 how many pairs (i, i+r) [wrapped periodically] belong to the same non-zero
-    cluster. Building block for C2(r) - same style as _line_pair_counts() (used for the
-    periodic S2 above), just testing cluster-label equality instead of raw phase equality.
+    r = 0..nt-1 how many pairs (i, i+r) [wrapped periodically, modulo the line's own length n]
+    belong to the same non-zero cluster. Building block for C2(r) - same style as
+    _s2_native_periodic_line() (used for the periodic S2 below), just testing cluster-label
+    equality instead of raw phase equality.
     """
     counts = np.zeros(nt, dtype=np.float64)
-    for i in range(maxx):
+    for i in range(n):
         li = labels_line[i]
         if li == 0:  # background pixel - can never be "in the same cluster" as anything
             continue
         for r in range(nt):
             j = i + r
-            if j >= maxx:
-                j -= maxx
+            if j >= n:
+                j -= n
             if labels_line[j] == li:
                 counts[r] += 1.0
     return counts
 
 
 @jit(nopython=True)
-def compute_c2_cluster(labels: np.ndarray, maxx: int, nt: int) -> np.ndarray:
-    """Two-point cluster function C2(r) = P(same non-zero cluster at distance r), periodic, averaged over rows+columns."""
+def compute_c2_cluster(labels: np.ndarray, nt: int) -> np.ndarray:
+    """
+    Two-point cluster function C2(r) = P(same non-zero cluster at distance r), periodic,
+    averaged over rows + columns. The image need not be square: each row/column wraps around
+    modulo its OWN length (same approach as _compute_s2_native_periodic()).
+    """
+    n_rows, n_cols = labels.shape
     total = np.zeros(nt, dtype=np.float64)
-    for row in range(maxx):
-        total += _cluster_line_pair_counts(labels[row, :], maxx, nt)
-    for col in range(maxx):
-        total += _cluster_line_pair_counts(labels[:, col], maxx, nt)
-    return total / (2.0 * maxx * maxx)
+    for row in range(n_rows):
+        total += _cluster_line_pair_counts(labels[row, :], n_cols, nt)  # a row has n_cols pixels
+    for col in range(n_cols):
+        total += _cluster_line_pair_counts(labels[:, col], n_rows, nt)  # a column has n_rows pixels
+    # rows give n_rows*n_cols trials, columns the same again -> both directions weigh equally
+    return total / (2.0 * n_rows * n_cols)
 
 
 def calculate_c2(image_data: np.ndarray) -> np.ndarray:
@@ -1045,22 +1052,21 @@ def calculate_c2(image_data: np.ndarray) -> np.ndarray:
     over rows and columns the same way calculate_s2_periodic() averages S2.
 
     Args:
-        image_data: 2D square binary image array (values should be 0 and 1)
+        image_data: 2D binary image array (values should be 0 and 1); need not be square.
 
     Returns:
-        1D array of C2 values, r = 0..Nt-1 where Nt = image_size // 2
+        1D array of C2 values, r = 0..Nt-1 where Nt = min(image_data.shape) // 2 - the same
+        length as calculate_s2_periodic(), so scale_c2_by_connectedness() can divide them
+        point by point.
     """
     if image_data.ndim != 2:
         raise ValueError('calculate_c2 only supports 2D images.')
-    if image_data.shape[0] != image_data.shape[1]:
-        raise ValueError('calculate_c2 requires a square image.')
 
-    ns = image_data.shape[0]
-    nt = ns // 2
+    nt = min(image_data.shape) // 2
 
     binary = (image_data != 0).astype(np.uint8)
     labels = _label_clusters_periodic(binary)
-    c2_values = compute_c2_cluster(labels, ns, nt)
+    c2_values = compute_c2_cluster(labels, nt)
 
     return c2_values
 
@@ -1073,8 +1079,7 @@ def _s2_native_periodic_line(line: np.ndarray, n: int, nt: int) -> np.ndarray:
     Same style as _cluster_line_pair_counts() above, but testing raw phase equality instead of
     cluster-label equality - i.e. this is S2's building block (calculate_s2_periodic() and
     calculate_s2_periodic_3d()), using the SAME periodic modulus (n = the line's own length)
-    as calculate_c2()/_label_clusters_periodic(), unlike compute_s2_polytope() below, which
-    uses modulo image_size+1 to match the legacy C++ code.
+    as calculate_c2()/_label_clusters_periodic() and the 2D/3D lineal-path and polytope functions.
     """
     counts = np.zeros(nt, dtype=np.float64)
     for i in range(n):
@@ -1166,9 +1171,8 @@ def scale_c2_by_connectedness(c2_values: np.ndarray, s2_values: np.ndarray) -> n
         c2_values: raw C2(r) array from calculate_c2() (2D) or calculate_c2_3d() (3D).
         s2_values: raw S2(r) array from calculate_s2_periodic() (2D) or
             calculate_s2_periodic_3d() (3D), computed on the SAME image - the same S2 curve
-            the polytope plots show. Not calculate_s2()/calculate_s2_3d() (non-periodic)
-            and not the polytope module's internal S2 (periodic modulo image_size+1), since
-            those use different boundary conventions.
+            the polytope plots show. Not calculate_s2()/calculate_s2_3d() (non-periodic),
+            since those use a different boundary convention.
 
     Returns:
         1D array, g(0) = 1.0, bounded in [0, 1] elsewhere. NaN at any r where S2(r) == 0
@@ -1390,15 +1394,13 @@ def calculate_s2_periodic_3d(image_data: np.ndarray) -> np.ndarray:
 # within the foreground phase) is inherently a 1D measurement - it scans straight lines and
 # measures chord lengths - so it generalises to 3D exactly like C2 did: scan lines along a
 # third axis instead of two, and reuse the same per-line building block unchanged.
-# _chord_counts_1d() (defined in the 2D polytope section above, already validated there
-# against the real C++ output) needs no changes at all - it just treats whatever 1D array
-# it's given as one periodic line, regardless of which 3D axis it was sliced from.
+# _chord_counts_1d_native() (defined in the 2D polytope section below) needs no changes at
+# all - it just treats whatever 1D array it's given as one periodic line, regardless of
+# which 3D axis it was sliced from.
 #
-# Like calculate_c2_3d()/calculate_s2_periodic_3d() above (and unlike the 2D lineal-path
-# inside calculate_polytopes_python(), which uses the polytope module's mod image_size+1
-# convention to stay bit-compatible with the legacy C++ Sample_Pn_UU.cpp), this uses the
-# native periodic convention (modulo the volume's own size, no padding) - there is no 3D C++
-# code to match here, and the native convention gives L(0) == porosity exactly.
+# Like calculate_c2_3d()/calculate_s2_periodic_3d() above and the 2D lineal path in
+# calculate_polytopes_python(), this uses the native periodic convention (each axis wraps
+# modulo its own length, no padding), which gives L(0) == porosity exactly.
 
 @jit(nopython=True)
 def compute_L_native_periodic_3d(binary_image: np.ndarray, nt: int) -> np.ndarray:
@@ -1424,10 +1426,10 @@ def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
     """
     Calculate the lineal-path function L(r) for a 3D binary volume - the probability that an
     entire straight line segment of length r lies fully within the foreground phase. 3D
-    analogue of the 2D lineal-path calculation inside calculate_polytopes_python(), scanned
-    along three axes (x, y, z) instead of two (rows, columns) - see the module note above for
-    why this uses a different (native) periodic convention than the 2D version. Does NOT
-    require a cubic volume - see compute_L_native_periodic_3d().
+    analogue of the 2D lineal-path calculation inside calculate_polytopes_python()
+    (compute_L_polytope()), scanned along three axes (x, y, z) instead of two (rows, columns),
+    with the same native periodic convention. Does NOT require a cubic volume - see
+    compute_L_native_periodic_3d().
 
     Unlike C2, L(r) decays to 0 as r grows for any structure that isn't 100% foreground (an
     entire line segment fully inside the foreground phase becomes vanishingly likely once r
@@ -1452,97 +1454,67 @@ def calculate_L_3d(image_data: np.ndarray) -> np.ndarray:
 
 ###---------------------polytope functions, pure Python/numba (no C++ executable)------------------------
 #
-# This section is a direct, function-by-function port of cpp_poly/512/Cpp_source/Polytope/Sample_Pn_UU.cpp
-# for a SINGLE square 2D binary image. It reproduces S2, L (lineal path), P3H/P3V (triangle),
-# P4 (square) and P6 (hexagon) without writing Mconfig.txt, without a subprocess call, and without
-# depending on an image-size-specific compiled executable (MAXX/Nt are derived from the image at
-# runtime instead of being baked in with #define).
+# S2, L (lineal path), P3H/P3V (triangle), P4 (square) and P6 (hexagon) for a single 2D binary
+# image. Ported function by function from cpp_poly/512/Cpp_source/Polytope/Sample_Pn_UU.cpp, but
+# without Mconfig.txt, without a subprocess call, and without an image-size-specific compiled
+# executable (Nt is derived from the image at runtime instead of being baked in with #define).
 #
-# One deliberate deviation from the C++: the original wraparound checks compare against MAXX
-# ("if (x > MAXX) x -= MAXX;") instead of MAXX-1 ("if (x >= MAXX) ..."). Because C stores the config
-# array row-major and contiguous, hitting x == MAXX exactly does not crash - it silently reads the
-# next row's pixel 0 instead of wrapping back to this row's pixel 0. That is undefined behaviour, not
-# a deliberate periodic-boundary design choice (the real periodic wrap is the MAXX/2 distance folding
-# used for S2/L), so here we use the mathematically correct `if x >= maxx: x -= maxx`.
+# Boundary convention: periodic, with each axis wrapping around modulo its OWN length (a row
+# wraps at the number of columns, a column at the number of rows) - the same convention as
+# calculate_s2_periodic(), calculate_c2() and the 3D functions. So:
+#   - the image need not be square;
+#   - every curve has Nt = min(image.shape) // 2 points, the largest distance that fits in
+#     BOTH directions, so rows and columns are averaged over the same r range;
+#   - P_n(0) is exactly the phase fraction phi, which cal_fn() relies on.
 #
-# Validated two ways against compare_polytopes.py (repo root):
+# The C++ instead only works on square images: it pads the image with one extra row and column
+# of background and wraps with period N + 1 (MAXX = N + 1, Nt = N // 2). Running these functions
+# on an image padded the same way - np.pad(image, ((0, 1), (0, 1))) - reproduces that convention
+# exactly; compare_polytopes.py does this to check against the C++ executable.
+#
+# One deliberate deviation from the C++: its wraparound checks compare against MAXX
+# ("if (x > MAXX) x -= MAXX;") instead of MAXX-1 ("if (x >= MAXX) ..."). Because C stores the
+# config array row-major and contiguous, hitting x == MAXX exactly does not crash - it silently
+# reads the next row's pixel 0 instead of wrapping back to this row's pixel 0. That is undefined
+# behaviour, not a deliberate periodic-boundary design choice, so here every wrap is the correct
+# `if x >= n: x -= n`. One such subtraction is enough: with nt <= min(shape) // 2, every vertex
+# offset is smaller than the length of the axis it moves along (P6, the widest shape, reaches at
+# most ~0.87 * min(shape) down and 0.75 * min(shape) across). This is noticeably faster than `%`
+# in these hot loops; only call the kernels with the nt from _binary_config().
+#
+# Validated (on the padded image, as above) with compare_polytopes.py (repo root):
 #  1) against the real sobj*.txt reference files that were already sitting in cpp_poly/512/runtime/,
 #     by reconstructing the image from the Mconfig.txt in that same folder;
 #  2) against a fresh run of the (statically-relinked) Sample_Pn_UU.exe on a real 512x512 XCT
 #     sandstone slice (test_images/XCT_11.4um_binary0000.tif).
 # S2, L, P4, P3H, P3V and P6 all matched closely in both runs (max abs diff ~1e-4, zero points differing
 # by more than 1e-4) - the tiny residual differences are consistent with the rare pixels where the C++'s
-# buggy `>` wraparound and this module's `>=` wraparound disagree, as expected, not a real algorithmic
-# mismatch. (Note: the original SobjHesaVer.txt (P6) sitting in cpp_poly/512/runtime/ was itself stale/
+# buggy `>` wraparound and the correct wraparound here disagree, not a real algorithmic mismatch.
+# (Note: the original SobjHesaVer.txt (P6) sitting in cpp_poly/512/runtime/ was itself stale/
 # inconsistent with the Mconfig.txt next to it - its R=0 value implied more foreground pixels than that
 # image actually has - but the fresh exe run resolved that ambiguity and confirmed compute_p6_polytope
 # is correct.)
+#
+# Large-R note: the polytopes are 2D shapes, so near the top of the r range they can span more than
+# half the image (P6 is ~1.7R tall and 2R wide) and wrap onto themselves. This holds for square and
+# non-square images alike.
 
-def _build_padded_config(image: np.ndarray) -> Tuple[np.ndarray, int, int]:
+def _binary_config(image: np.ndarray) -> Tuple[np.ndarray, int]:
     """
-    Build the zero-padded 'config' array the C++ code works on.
+    Build the 0/1 'config' array the polytope functions work on (pore/foreground = 1, matches
+    read_config() in the C++) and the number of distances Nt = min(image.shape) // 2.
 
-    The C++ uses MAXX = image_size + 1 and Nt = image_size // 2 (see the README's compile
-    instructions, e.g. MAXX=513/Nt=256 for a 512x512 image). The extra row/column (index
-    image_size) is always background - it exists only so the periodic distance-folding
-    (`if d >= maxx//2: d = maxx - d`) has an odd-sized period and pixel 0 is never adjacent
-    to pixel (image_size - 1) by construction.
+    No padding: each axis wraps around at its own length (see the section note above), so any
+    2D image works, square or not.
 
-    Returns (config, maxx, nt).
+    Returns (config, nt).
     """
     if image.ndim != 2:
         raise ValueError('Input image must be 2D.')
-    if image.shape[0] != image.shape[1]:
-        raise ValueError('Input image must be square (the C++ code assumes equal dimensions).')
 
-    ns = image.shape[0]
-    maxx = ns + 1
-    nt = ns // 2
-
-    config = np.zeros((maxx, maxx), dtype=np.uint8)
-    config[:ns, :ns] = (image != 0).astype(np.uint8)  # pore/foreground = 1, matches read_config()
-    return config, maxx, nt
-
-
-@jit(nopython=True)
-def _line_pair_counts(line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
-    """
-    For one 1D periodic line (a row or column of `config`), count how many pairs of
-    foreground pixels are separated by each distance r = 0..nt-1 (self-pairs count as
-    distance 0). Distances wrap around using period `maxx` (matches sampleS2line()/
-    sampleS2colume() in the C++). This is the building block for S2(r).
-    """
-    counts = np.zeros(nt, dtype=np.float64)
-
-    positions = np.empty(maxx, dtype=np.int64)
-    n_pos = 0
-    for i in range(maxx):
-        if line[i] == 1:
-            positions[n_pos] = i
-            n_pos += 1
-
-    half = maxx // 2
-    for i in range(n_pos):
-        for j in range(i + 1):  # j <= i: includes the self-pair (distance 0) once per pixel
-            d = positions[i] - positions[j]
-            if d < 0:
-                d = -d
-            if d >= half:
-                d = maxx - d
-            if d < nt:
-                counts[d] += 1.0
-    return counts
-
-
-@jit(nopython=True)
-def compute_s2_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
-    """Two-point correlation S2(r), periodic-boundary version (matches Sample_Pn_UU.cpp main())."""
-    total = np.zeros(nt, dtype=np.float64)
-    for col in range(maxx):
-        total += _line_pair_counts(config[:, col], maxx, nt)
-    for row in range(maxx):
-        total += _line_pair_counts(config[row, :], maxx, nt)
-    return total / (2.0 * maxx * maxx)
+    config = (image != 0).astype(np.uint8)
+    nt = min(config.shape) // 2  # largest r that fits in both the row and the column direction
+    return config, nt
 
 
 @jit(nopython=True)
@@ -1558,52 +1530,61 @@ def _add_chord_length(counts: np.ndarray, length: int, nt: int) -> None:
 
 
 @jit(nopython=True)
-def _chord_counts_1d(line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+def _chord_counts_1d_native(line: np.ndarray, n: int, nt: int) -> np.ndarray:
     """
-    Lineal-path sampling along one periodic 1D line (a row or column of `config`).
+    Lineal-path sampling along one periodic 1D line of n pixels - a row or column of a 2D
+    image (compute_L_polytope()), or a line along any axis of a 3D volume
+    (compute_L_native_periodic_3d()).
 
     Step 1: classify every pixel by how many of its (periodic) neighbours are foreground:
     -1 = background, 0 = isolated foreground pixel, 1 = chord endpoint, 2 = inside a chord.
     Step 2: collect the endpoints (ener == 1) in array order, then walk them in consecutive
     pairs to get each chord's length, adding it to the histogram via _add_chord_length().
-    A chord that straddles the array boundary (pixel 0 and pixel maxx-1 both foreground) is
+    A chord that straddles the array boundary (pixel 0 and pixel n-1 both foreground) is
     stitched together from the last and first endpoints instead of treated as two chords.
 
-    Ported line-for-line from sample_horizontal()/sample_vertical() in Sample_Pn_UU.cpp -
-    both functions are the same algorithm, just applied to a row vs. a column.
+    Ported from sample_horizontal()/sample_vertical() in Sample_Pn_UU.cpp (both are the same
+    algorithm, just applied to a row vs. a column), with one bug fixed: when the ENTIRE
+    periodic line is foreground (no background pixel anywhere on it), the C++ adds `n - r` to
+    each bin `r` - a formula for a *finite* chord of length n sitting inside a line that has a
+    background boundary somewhere. But a fully-foreground periodic line has no boundary at
+    all: every one of the n starting positions admits a valid segment of ANY length r (it just
+    keeps going around the ring), so the correct count is a constant n at every r. A padded
+    image (see the section note above) never has such a line, so the C++ comparison is
+    unaffected.
     """
     counts = np.zeros(nt, dtype=np.float64)
 
-    ener = np.empty(maxx, dtype=np.int64)
+    ener = np.empty(n, dtype=np.int64)
     flag_empty = 0
-    for i in range(maxx):
+    for i in range(n):
         if line[i] == 0:
             ener[i] = -1
         else:
             en = 0
             neb1 = i - 1
             if neb1 < 0:
-                neb1 += maxx
+                neb1 += n
             if line[neb1] == 1:
                 en += 1
             neb2 = i + 1
-            if neb2 >= maxx:
-                neb2 -= maxx
+            if neb2 >= n:
+                neb2 -= n
             if line[neb2] == 1:
                 en += 1
             ener[i] = en
             flag_empty += 1
 
-    position = np.empty(maxx, dtype=np.int64)
+    position = np.empty(n, dtype=np.int64)
     ctp = 0
-    for i in range(maxx):
+    for i in range(n):
         if ener[i] == 1:
             position[ctp] = i
             ctp += 1
         elif ener[i] == 0:
             counts[0] += 1.0  # isolated single-pixel chord: only contributes to r=0
 
-    if line[0] == 1 and line[maxx - 1] == 1:
+    if line[0] == 1 and line[n - 1] == 1:
         # the foreground run straddles the periodic boundary
         if ctp > 2:
             i = 1
@@ -1612,95 +1593,17 @@ def _chord_counts_1d(line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
                 _add_chord_length(counts, length, nt)
                 i += 2
             # wrap-around chord: from the last endpoint to the end, plus start to the first endpoint
-            length = (position[0] + 1) + (maxx - position[ctp - 1])
+            length = (position[0] + 1) + (n - position[ctp - 1])
             _add_chord_length(counts, length, nt)
         elif ctp == 2:
-            length = (position[0] + 1) + (maxx - position[ctp - 1])
-            _add_chord_length(counts, length, nt)
-        elif ctp == 0 and flag_empty != 0:
-            # whole line is foreground: one chord that is the full periodic ring
-            _add_chord_length(counts, maxx, nt)
-    else:
-        i = 0
-        while i < ctp:
-            length = position[i + 1] - position[i] + 1
-            _add_chord_length(counts, length, nt)
-            i += 2
-
-    return counts
-
-
-@jit(nopython=True)
-def _chord_counts_1d_native(line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
-    """
-    Same as _chord_counts_1d() above, with one bug fixed: when the ENTIRE periodic line is
-    foreground (no background pixel anywhere on it), _chord_counts_1d() adds `maxx - r` to
-    each bin `r` - a formula for a *finite* chord of length `maxx` sitting inside a line that
-    has a background boundary somewhere. But a fully-foreground periodic line has no boundary
-    at all: every one of the `maxx` starting positions admits a valid segment of ANY length r
-    (it just keeps going around the ring), so the correct count is a constant `maxx` at every
-    r, not a value that decreases with r.
-
-    This formula (`len - r`) is copied verbatim from the original C++ (Sample_Pn_UU.cpp), so
-    it isn't a bug introduced by the port - it was already there. It practically never gets
-    exercised on real porous-rock images (an entire row/column is essentially never 100%
-    foreground), which is why it was never caught during 2D validation against the compiled
-    C++ output. _chord_counts_1d() is left untouched (still used by the 2D polytope module,
-    compute_L_polytope(), which is deliberately kept bug-compatible with the legacy C++ for
-    validated bit-for-bit parity) - this corrected copy is only used by the native (3D, no
-    legacy C++ to match) lineal-path code below, where there's no reason to keep the bug.
-    """
-    counts = np.zeros(nt, dtype=np.float64)
-
-    ener = np.empty(maxx, dtype=np.int64)
-    flag_empty = 0
-    for i in range(maxx):
-        if line[i] == 0:
-            ener[i] = -1
-        else:
-            en = 0
-            neb1 = i - 1
-            if neb1 < 0:
-                neb1 += maxx
-            if line[neb1] == 1:
-                en += 1
-            neb2 = i + 1
-            if neb2 >= maxx:
-                neb2 -= maxx
-            if line[neb2] == 1:
-                en += 1
-            ener[i] = en
-            flag_empty += 1
-
-    position = np.empty(maxx, dtype=np.int64)
-    ctp = 0
-    for i in range(maxx):
-        if ener[i] == 1:
-            position[ctp] = i
-            ctp += 1
-        elif ener[i] == 0:
-            counts[0] += 1.0  # isolated single-pixel chord: only contributes to r=0
-
-    if line[0] == 1 and line[maxx - 1] == 1:
-        # the foreground run straddles the periodic boundary
-        if ctp > 2:
-            i = 1
-            while i < ctp - 1:
-                length = position[i + 1] - position[i] + 1
-                _add_chord_length(counts, length, nt)
-                i += 2
-            # wrap-around chord: from the last endpoint to the end, plus start to the first endpoint
-            length = (position[0] + 1) + (maxx - position[ctp - 1])
-            _add_chord_length(counts, length, nt)
-        elif ctp == 2:
-            length = (position[0] + 1) + (maxx - position[ctp - 1])
+            length = (position[0] + 1) + (n - position[ctp - 1])
             _add_chord_length(counts, length, nt)
         elif ctp == 0 and flag_empty != 0:
             # whole line is foreground and periodic - no boundary anywhere, so every one of
-            # the `maxx` starting positions admits a chord of any length r (FIX: constant
-            # `maxx`, not `maxx - r` - see this function's docstring).
+            # the n starting positions admits a chord of any length r (FIX: constant n,
+            # not `n - r` - see this function's docstring).
             for r in range(nt):
-                counts[r] += maxx
+                counts[r] += n
     else:
         i = 0
         while i < ctp:
@@ -1712,43 +1615,50 @@ def _chord_counts_1d_native(line: np.ndarray, maxx: int, nt: int) -> np.ndarray:
 
 
 @jit(nopython=True)
-def compute_L_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
-    """Lineal-path function L(r), periodic-boundary version (matches Sample_Pn_UU.cpp main())."""
+def compute_L_polytope(config: np.ndarray, nt: int) -> np.ndarray:
+    """
+    Lineal-path function L(r), periodic, averaged over rows + columns. Each row/column wraps
+    around modulo its OWN length, so the image need not be square.
+    """
+    n_rows, n_cols = config.shape
     total = np.zeros(nt, dtype=np.float64)
-    for row in range(maxx):
-        total += _chord_counts_1d(config[row, :], maxx, nt)
-    for col in range(maxx):
-        total += _chord_counts_1d(config[:, col], maxx, nt)
-    return total / (2.0 * maxx * maxx)
+    for row in range(n_rows):
+        total += _chord_counts_1d_native(config[row, :], n_cols, nt)  # a row has n_cols pixels
+    for col in range(n_cols):
+        total += _chord_counts_1d_native(config[:, col], n_rows, nt)  # a column has n_rows pixels
+    # rows give n_rows*n_cols trials, columns the same again -> both directions weigh equally
+    return total / (2.0 * n_rows * n_cols)
 
 
 @jit(nopython=True)
-def compute_p4_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+def compute_p4_polytope(config: np.ndarray, nt: int) -> np.ndarray:
     """
     P4 (axis-aligned square) 4-point polytope function.
 
     For every foreground pixel (r,c) and side length R = 0..nt-1, tests whether the other
     3 corners of the R x R square - (r, c+R), (r+R, c), (r+R, c+R) - are also foreground.
-    Ported from squrefunction() in Sample_Pn_UU.cpp (periodic wrap fixed, see module docstring above).
+    Row indices wrap modulo the number of rows, column indices modulo the number of columns.
+    Ported from squrefunction() in Sample_Pn_UU.cpp (periodic wrap fixed, see section note above).
     """
+    n_rows, n_cols = config.shape
     sq = np.zeros(nt, dtype=np.float64)
     for R in range(nt):
-        for r in range(maxx):
-            for c in range(maxx):
+        for r in range(n_rows):
+            for c in range(n_cols):
                 if config[r, c] == 1:
-                    xx = c + R
-                    if xx >= maxx:
-                        xx -= maxx
-                    yy = r + R
-                    if yy >= maxx:
-                        yy -= maxx
+                    xx = c + R  # column of the two right-hand corners
+                    if xx >= n_cols:
+                        xx -= n_cols
+                    yy = r + R  # row of the two lower corners
+                    if yy >= n_rows:
+                        yy -= n_rows
                     if config[r, xx] == 1 and config[yy, c] == 1 and config[yy, xx] == 1:
                         sq[R] += 1.0
-    return sq / (maxx * maxx)
+    return sq / (n_rows * n_cols)  # every pixel is tried once as the first corner
 
 
 @jit(nopython=True)
-def compute_p3v_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+def compute_p3v_polytope(config: np.ndarray, nt: int) -> np.ndarray:
     """
     P3-vertical (triangle) 3-point polytope function.
 
@@ -1756,107 +1666,117 @@ def compute_p3v_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
     at 0, matching the C++ which only samples even R), tests a triangle with one vertical side
     of length R below (r,c) and an apex offset diagonally by R/2 * sqrt(3): the other two
     vertices are (r+R, c) and (r + R/2, c + R/2*sqrt(3) [+1 rounding term, except at R=0]).
-    Ported from TriangleVer() in Sample_Pn_UU.cpp (periodic wrap fixed, see module docstring above).
+    Ported from TriangleVer() in Sample_Pn_UU.cpp (periodic wrap fixed, see section note above).
     """
+    n_rows, n_cols = config.shape
     tri = np.zeros(nt, dtype=np.float64)
     sqrt3 = math.sqrt(3.0)
     for R in range(0, nt, 2):
         half = R // 2
-        for r in range(maxx):
-            for c in range(maxx):
+        # horizontal distance from the vertical side to the apex, in whole pixels
+        if R == 0:
+            shift = int(half * sqrt3)
+        else:
+            shift = int(half * sqrt3 + 1.0)
+        for r in range(n_rows):
+            for c in range(n_cols):
                 if config[r, c] == 1:
-                    if R == 0:
-                        xx = c + int(half * sqrt3)
-                    else:
-                        xx = c + int(half * sqrt3 + 1.0)
-                    if xx >= maxx:
-                        xx -= maxx
-                    gg = r + half
-                    if gg >= maxx:
-                        gg -= maxx
-                    yy = r + R
-                    if yy >= maxx:
-                        yy -= maxx
+                    xx = c + shift  # apex column
+                    if xx >= n_cols:
+                        xx -= n_cols
+                    gg = r + half   # apex row
+                    if gg >= n_rows:
+                        gg -= n_rows
+                    yy = r + R      # row of the second vertex on the vertical side
+                    if yy >= n_rows:
+                        yy -= n_rows
                     if config[yy, c] == 1 and config[gg, xx] == 1:
                         tri[R] += 1.0
-    return tri / (maxx * maxx)
+    return tri / (n_rows * n_cols)
 
 
 @jit(nopython=True)
-def compute_p3h_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+def compute_p3h_polytope(config: np.ndarray, nt: int) -> np.ndarray:
     """
     P3-horizontal (triangle) 3-point polytope function - the row/column mirror of
-    compute_p3v_polytope(). Ported from TriangleHor() in Sample_Pn_UU.cpp.
+    compute_p3v_polytope(): P3H of an image equals P3V of its transpose.
+    Ported from TriangleHor() in Sample_Pn_UU.cpp.
     """
+    n_rows, n_cols = config.shape
     tri = np.zeros(nt, dtype=np.float64)
     sqrt3 = math.sqrt(3.0)
     for R in range(0, nt, 2):
         half = R // 2
-        for r in range(maxx):
-            for c in range(maxx):
+        # vertical distance from the horizontal side to the apex, in whole pixels
+        if R == 0:
+            shift = int(half * sqrt3)
+        else:
+            shift = int(half * sqrt3 + 1.0)
+        for r in range(n_rows):
+            for c in range(n_cols):
                 if config[r, c] == 1:
-                    if R == 0:
-                        yy = r + int(half * sqrt3)
-                    else:
-                        yy = r + int(half * sqrt3 + 1.0)
-                    if yy >= maxx:
-                        yy -= maxx
-                    gg = c + half
-                    if gg >= maxx:
-                        gg -= maxx
-                    xx = c + R
-                    if xx >= maxx:
-                        xx -= maxx
+                    yy = r + shift  # apex row
+                    if yy >= n_rows:
+                        yy -= n_rows
+                    gg = c + half   # apex column
+                    if gg >= n_cols:
+                        gg -= n_cols
+                    xx = c + R      # column of the second vertex on the horizontal side
+                    if xx >= n_cols:
+                        xx -= n_cols
                     if config[r, xx] == 1 and config[yy, gg] == 1:
                         tri[R] += 1.0
-    return tri / (maxx * maxx)
+    return tri / (n_rows * n_cols)
 
 
 @jit(nopython=True)
-def compute_p6_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
+def compute_p6_polytope(config: np.ndarray, nt: int) -> np.ndarray:
     """
     P6-vertical (hexagon) 6-point polytope function.
 
     For every foreground pixel (r,c) and radius R = 0..nt-1, builds the other 5 vertices
     (P2..P6) of a hexagon around (r,c), rounding each coordinate with ceil() exactly as the
-    C++ does, and tests whether all 5 are also foreground.
-    Ported from HexagonVer() in Sample_Pn_UU.cpp (periodic wrap fixed, see module docstring above).
+    C++ does, and tests whether all 5 are also foreground. The p*x coordinates are rows (wrap
+    modulo the number of rows), the p*y coordinates are columns (wrap modulo the number of columns).
+    Ported from HexagonVer() in Sample_Pn_UU.cpp (periodic wrap fixed, see section note above).
     Note: HexagonHor()/Octa()/Arbitrary() from the C++ are not ported - calculate_polytopes()
     never used them (only polytope_P6V / HexagonVer feeds the 'p6' result).
     """
+    n_rows, n_cols = config.shape
     hexv = np.zeros(nt, dtype=np.float64)
     sqrt3 = math.sqrt(3.0)
     for R in range(nt):
-        for r in range(maxx):
-            for c in range(maxx):
+        for r in range(n_rows):
+            for c in range(n_cols):
                 if config[r, c] == 1:
                     p2x = math.ceil(r + sqrt3 * 0.5 * R)
                     p2y = math.ceil(c - 0.5 * R)
                     p3x = math.ceil(r + sqrt3 * 0.5 * R + sqrt3 * 0.5 * R)
-                    p3y = math.ceil(c + 0.5 * R - 0.5 * R)
+                    p3y = math.ceil(c + 0.5 * R - 0.5 * R)  # = c, never out of range
                     p4x = p3x
                     p4y = math.ceil(c + 0.5 * R - 0.5 * R + R)
                     p5x = p2x
                     p5y = math.ceil(c + R + 0.5 * R)
-                    p6x = math.ceil(float(r))
+                    p6x = math.ceil(float(r))               # = r, never out of range
                     p6y = math.ceil(c + R)
 
-                    if p2x >= maxx:
-                        p2x -= maxx
+                    # rows wrap at n_rows, columns at n_cols (p2y is the only one that can go negative)
+                    if p2x >= n_rows:
+                        p2x -= n_rows
                     if p2y < 0:
-                        p2y += maxx
-                    if p3x >= maxx:
-                        p3x -= maxx
-                    if p4x >= maxx:
-                        p4x -= maxx
-                    if p4y >= maxx:
-                        p4y -= maxx
-                    if p5x >= maxx:
-                        p5x -= maxx
-                    if p5y >= maxx:
-                        p5y -= maxx
-                    if p6y >= maxx:
-                        p6y -= maxx
+                        p2y += n_cols
+                    if p3x >= n_rows:
+                        p3x -= n_rows
+                    if p4x >= n_rows:
+                        p4x -= n_rows
+                    if p4y >= n_cols:
+                        p4y -= n_cols
+                    if p5x >= n_rows:
+                        p5x -= n_rows
+                    if p5y >= n_cols:
+                        p5y -= n_cols
+                    if p6y >= n_cols:
+                        p6y -= n_cols
 
                     i2x, i2y = int(p2x), int(p2y)
                     i3x, i3y = int(p3x), int(p3y)
@@ -1868,7 +1788,7 @@ def compute_p6_polytope(config: np.ndarray, maxx: int, nt: int) -> np.ndarray:
                             config[i4x, i4y] == 1 and config[i5x, i5y] == 1 and
                             config[i6x, i6y] == 1):
                         hexv[R] += 1.0
-    return hexv / (maxx * maxx)
+    return hexv / (n_rows * n_cols)
 
 
 def scale_by_initial_value(values: np.ndarray) -> np.ndarray:
@@ -1889,27 +1809,28 @@ def calculate_polytopes_python(image: np.ndarray,
                                 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
     Pure-Python/numba replacement for calculate_polytopes() + the compiled Sample_Pn_UU
-    executable, for a SINGLE square 2D binary image. No Mconfig.txt/output files, no
-    subprocess call, and no image-size-specific compiled executable are needed - this
-    works directly on the numpy array, for any square image size.
+    executable, for a SINGLE 2D binary image of any shape (need not be square). No
+    Mconfig.txt/output files, no subprocess call, and no image-size-specific compiled
+    executable are needed - this works directly on the numpy array.
 
     Parameters
     ----------
-    image : 2D square binary array (0 = solid/background, 1 = pore/foreground).
+    image : 2D binary array (0 = solid/background, 1 = pore/foreground), square or not.
     polytopes : which functions to compute. Any of 's2', 'L', 'p3h', 'p3v', 'p4', 'p6'.
 
     Returns
     -------
-    raw : dict {name -> Nt x 2 array of [r, value]}, same layout as np.loadtxt('SobjXXX.txt')
-          in the old cpp-based workflow.
+    raw : dict {name -> Nt x 2 array of [r, value]}, Nt = min(image.shape) // 2, same layout
+          as np.loadtxt('SobjXXX.txt') in the old cpp-based workflow.
     scaled : dict {name -> Nt x 2 array of [r, f(r)]}, the normalised companion curve:
           S2, P3H, P3V, P4 and P6 are scaled with cal_fn() as (Pn - phi^n) / (phi - phi^n),
           n = number of vertices (2, 3, 3, 4, 6); L is scaled as L(r) / L(0)
-          (scale_by_initial_value()). Only the RAW curves match the old C++ workflow - the
-          old Microstructure class scaled the polytopes against their last sampled point
-          instead of phi^n, and reused the S2 curve for L.
+          (scale_by_initial_value()). Only the RAW curves of a padded image match the old C++
+          workflow (see the section note above) - the old Microstructure class scaled the
+          polytopes against their last sampled point instead of phi^n, and reused the S2 curve
+          for L.
     """
-    config, maxx, nt = _build_padded_config(image)
+    config, nt = _binary_config(image)
 
     r_axis = np.arange(nt, dtype=np.float64)
     raw: Dict[str, np.ndarray] = {}
@@ -1917,22 +1838,22 @@ def calculate_polytopes_python(image: np.ndarray,
 
     for name in polytopes:
         if name == 's2':
-            values = compute_s2_polytope(config, maxx, nt)
+            values = _compute_s2_native_periodic(config, nt)  # the same S2 as calculate_s2_periodic()
             values_scaled = cal_fn(values, n=2)             # (S2 - phi^2) / (phi - phi^2), same formula as the GUI's S2
         elif name == 'L':
-            values = compute_L_polytope(config, maxx, nt)
+            values = compute_L_polytope(config, nt)
             values_scaled = scale_by_initial_value(values)  # L(r)/L(0): L's OWN curve; L -> 0 at large r, so no floor to subtract
         elif name == 'p3h':
-            values = compute_p3h_polytope(config, maxx, nt)
+            values = compute_p3h_polytope(config, nt)
             values_scaled = cal_fn(values, n=3)             # triangle: 3 vertices -> long-range limit phi^3
         elif name == 'p3v':
-            values = compute_p3v_polytope(config, maxx, nt)
+            values = compute_p3v_polytope(config, nt)
             values_scaled = cal_fn(values, n=3)
         elif name == 'p4':
-            values = compute_p4_polytope(config, maxx, nt)
+            values = compute_p4_polytope(config, nt)
             values_scaled = cal_fn(values, n=4)             # square: 4 vertices -> phi^4
         elif name == 'p6':
-            values = compute_p6_polytope(config, maxx, nt)
+            values = compute_p6_polytope(config, nt)
             values_scaled = cal_fn(values, n=6)             # hexagon: 6 vertices -> phi^6
         else:
             raise ValueError(f"Unknown polytope '{name}'. Use one of: s2, L, p3h, p3v, p4, p6.")
@@ -1953,6 +1874,10 @@ def compute_2d_polytope_curves(image_2d: np.ndarray, selected_polytopes: List[st
     S2 is the periodic S2 (calculate_s2_periodic(), Torquato 2002 Sec. 12.5.1), scaled
     with cal_fn(n=2); the same S2 is the denominator of the scaled C2 (C2/S2).
     L, P3H, P3V, P4 and P6 come from calculate_polytopes_python().
+
+    The image need not be square: every function uses the same periodic convention (each
+    axis wraps at its own length) and returns Nt = min(image_2d.shape) // 2 points, e.g.
+    r = 0..274 for a 551 x 580 slice - the same rule as compute_3d_polytope_curves().
     """
     raw_curves = {}
     scaled_curves = {}
