@@ -4,6 +4,7 @@ Main image viewer window for the Micro_GUI application.
 
 import os
 import time
+import weakref
 import numpy as np
 from typing import Optional, List
 
@@ -59,6 +60,11 @@ from ..analysis.connected_components import (
 from .connected_components_results_dialog import ConnectedComponentsResultsDialog
 from .measurements_settings_dialog import MeasurementsSettingsDialog
 from .connected_components_settings_dialog import ConnectedComponentsSettingsDialog
+
+# cropping
+from .crop_center_dialog import CropCenterDialog
+from ..processing.cropping import CropBox, crop_image, exterior_value_candidates, find_center_crop_box
+
 ## caclulation threads for background processing, so GUI remains responsive
 
 class REVCalculationThread(QThread):
@@ -669,6 +675,43 @@ class SliceEvolutionStreamingThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+class CropCenterThread(QThread):
+    """
+    Thread that finds the center crop box (see find_center_crop_box in
+    processing/cropping.py) in the background. It labels the exterior in every slice,
+    which takes several seconds on a large volume - long enough to freeze the UI if
+    run directly on the GUI thread.
+
+    Only FINDS the box. Cutting it out is instant and happens back on the GUI thread
+    (ImageViewer._apply_center_crop), after the user has confirmed it.
+    """
+
+    finished = Signal(object)    # Emits the CropBox
+    error = Signal(str)
+    progress = Signal(int, int)  # (completed, total) - slices searched for the sample so far
+
+    def __init__(self, image_data: np.ndarray, exterior_value, make_cube: bool, margin: int):
+        super().__init__()
+        self.image_data = image_data
+        self.exterior_value = exterior_value
+        self.make_cube = make_cube
+        self.margin = margin
+
+    def run(self):
+        try:
+            box = find_center_crop_box(
+                self.image_data,
+                self.exterior_value,
+                make_cube=self.make_cube,
+                margin=self.margin,
+                # emit() can be called from this worker thread; Qt delivers the
+                # signal to the GUI thread, which updates the progress bar.
+                progress_callback=self.progress.emit,
+            )
+            self.finished.emit(box)
+        except Exception as e:
+            self.error.emit(str(e))
+
 class ImageViewer(QMainWindow):
     """
     Main window for the Micro_GUI image viewer application.
@@ -715,6 +758,10 @@ class ImageViewer(QMainWindow):
         self.current_file_path: Optional[str] = None
         self.current_slice_index: int = 0
         self.current_time_index: int = 0 # which 3D volume (T axis) is showing, 4D data only
+
+        # Crop Center: the open (non-modal) settings dialog and the background search, if any.
+        self.crop_center_dialog: Optional[CropCenterDialog] = None
+        self.crop_thread: Optional[CropCenterThread] = None
 
 
         # Initialize UI components
@@ -819,6 +866,15 @@ class ImageViewer(QMainWindow):
         binarize_action.setStatusTip("Select a pixel value to become the foreground (1); everything else becomes background (0)")
         binarize_action.triggered.connect(self.open_binarize_dialog)
 
+        # Cropping submenu - room for more cropping tools (e.g. a manual box) later
+        cropping_menu = process_menu.addMenu("&Cropping")
+
+        crop_center_action = cropping_menu.addAction("Crop &Center...")
+        crop_center_action.setStatusTip(
+            "Crop the largest box around the center of a cylindrical sample that lies "
+            "completely inside the sample, removing the exterior (air) around it"
+        )
+        crop_center_action.triggered.connect(self.open_crop_center_dialog)
 
         # SMD menu
         smd_menu = menubar.addMenu("&SMDs")
@@ -1115,7 +1171,8 @@ class ImageViewer(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{str(e)}")
                 self.status_bar.showMessage(f"Error: {str(e)}")
 
-    def _finalize_loaded_image(self, image_data: np.ndarray, source_label: str, data_mode: str, stack_labels=None):
+    def _finalize_loaded_image(self, image_data: np.ndarray, source_label: str, data_mode: str, stack_labels=None,
+                               warn_if_not_binary: bool = True):
 
         """
         Shared tail-end of loading any image (single file or imported sequence): validates
@@ -1126,6 +1183,10 @@ class ImageViewer(QMainWindow):
         one explicitly (open_image, open_import_volume_dialog) - only
         open_import_time_series_dialog currently passes real values, so a previously-loaded
         time series's numbers don't linger and get wrongly reused for whatever gets loaded next.
+
+        warn_if_not_binary=False skips the "Binarization Required" pop-up - used when the
+        image is replaced by a processed version of itself (e.g. a crop), where the user
+        already saw that warning when the original was loaded.
         """
 
         # Normalise shapes that are really 2D but arrive with a third axis,
@@ -1206,11 +1267,12 @@ class ImageViewer(QMainWindow):
             self.status_bar.showMessage(f"Loaded: {source_label}")
         else:
             self.status_bar.showMessage("Multi-label image loaded - binarization required")
-            QMessageBox.warning(
-                self, "Binarization Required",
-                f"This image has {len(unique_values)} distinct pixel values: {list(unique_values)}.\n\n"
-                "Use Process > Binarize to select a foreground label before running calculations."
-            )
+            if warn_if_not_binary:
+                QMessageBox.warning(
+                    self, "Binarization Required",
+                    f"This image has {len(unique_values)} distinct pixel values: {list(unique_values)}.\n\n"
+                    "Use Process > Binarize to select a foreground label before running calculations."
+                )
 
         self.setWindowTitle(f"SMiCA - [{dims}] - {source_label}")   
 
@@ -1360,7 +1422,198 @@ class ImageViewer(QMainWindow):
             "Binarization Complete",
             f"Pixel value {foreground_value} is now the foreground (1); everything else is background (0)."
         )
-        
+
+    def open_crop_center_dialog(self):
+        """
+        Process > Cropping > Crop Center...: open the crop settings dialog.
+
+        The dialog is non-modal (like Binarize), so the user can keep hovering over the
+        image to check pixel values - e.g. to see which value the air has - while it is
+        open. This method therefore returns straight away; clicking OK calls
+        _start_center_crop_search, and the image is only cropped in
+        on_crop_center_finished, after the user has seen and confirmed the box.
+        """
+
+        # Only one Crop Center dialog at a time - clicking the menu again just brings the
+        # open one to the front.
+        if self.crop_center_dialog is not None and self.crop_center_dialog.isVisible():
+            self.crop_center_dialog.raise_()
+            self.crop_center_dialog.activateWindow()
+            return
+
+        if self.current_image_data is None:
+            QMessageBox.warning(self, "No Image", "Please open an image first.")
+            return
+
+        # In a time series the first axis is time, not Z, and streaming mode only has one
+        # volume in memory - neither fits "one fixed box for the whole image" yet.
+        if self.data_mode in ('time_series', '4d_time_series', '4d_time_series_streaming'):
+            QMessageBox.information(
+                self, "Crop Center Not Available",
+                "Crop Center currently works on single 2D images and 3D volumes only.\n\n"
+                "Time series (2D + time or 3D + time) aren't supported yet."
+            )
+            return
+
+        is_3d = self.current_image_data.ndim == 3
+
+        # Only values found along the image edges can be the air around the sample, so
+        # the dialog offers just those (most common first) instead of every value.
+        # Kept on self - with show() instead of exec() this method returns immediately, and
+        # Python would otherwise garbage-collect the dialog while it is still on screen.
+        self.crop_center_dialog = CropCenterDialog(
+            exterior_value_candidates(self.current_image_data), is_3d=is_3d, parent=self
+        )
+
+        # Remember which image the dialog was opened for (checked when OK is clicked). A
+        # weak reference doesn't keep that image alive by itself, so a large volume can
+        # still be freed if another image replaces it while the dialog is open.
+        self._crop_dialog_image_ref = weakref.ref(self.current_image_data)
+
+        self.crop_center_dialog.accepted.connect(self._start_center_crop_search)
+        self.crop_center_dialog.show()
+
+    def _start_center_crop_search(self):
+        """Called when the (non-modal) Crop Center dialog is accepted - starts the box search
+        in a background thread."""
+
+        # The main window stays usable while the dialog is open, so another image may have
+        # been loaded or binarized in the meantime. The dialog's exterior values describe
+        # the image it was opened for, so don't apply them to a different one.
+        if self._crop_dialog_image_ref() is not self.current_image_data:
+            QMessageBox.warning(
+                self, "Image Changed",
+                "The image changed while the Crop Center dialog was open.\n\n"
+                "Please open Process > Cropping > Crop Center... again."
+            )
+            return
+
+        # Replacing self.crop_thread while the previous search is still busy would destroy
+        # a running QThread, which crashes the application.
+        if self.crop_thread is not None and self.crop_thread.isRunning():
+            QMessageBox.information(
+                self, "Crop Center",
+                "A center crop search is already running - please wait for it to finish."
+            )
+            return
+
+        dialog = self.crop_center_dialog
+        is_3d = self.current_image_data.ndim == 3
+
+        # Progress = slices searched for the sample (the slow first step of the box search)
+        total = self.current_image_data.shape[0] if is_3d else 1
+
+        # Determinate progress bar, driven by the shared on_evolution_progress handler,
+        # which also shows the estimated remaining time in the status bar.
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(0)
+        self._evolution_start_time = time.perf_counter()
+        self._evolution_description = "Finding center crop"
+        self.status_bar.showMessage(f"{self._evolution_description}: 0/{total}")
+        QApplication.processEvents()
+
+        self.crop_thread = CropCenterThread(
+            self.current_image_data,
+            exterior_value=dialog.get_exterior_value(),
+            make_cube=dialog.get_make_cube(),
+            margin=dialog.get_margin(),
+        )
+        self.crop_thread.progress.connect(self.on_evolution_progress)
+        self.crop_thread.finished.connect(self.on_crop_center_finished)
+        self.crop_thread.error.connect(self.on_crop_center_error)
+        self.crop_thread.start()
+
+    def on_crop_center_finished(self, box: CropBox):
+        """Show the box that was found and, if the user confirms, crop the image to it."""
+
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)  # restore indeterminate default for other calculations
+
+        # The box belongs to the image it was computed on. If the user loaded or binarized
+        # another image while the search was running, don't apply it to that one.
+        image = self.crop_thread.image_data
+        # The thread object stays around on self; drop its reference so the full-size
+        # original can be freed once the cropped copy replaces it.
+        self.crop_thread.image_data = None
+        if image is not self.current_image_data:
+            self.status_bar.showMessage("Center crop discarded - the image changed while it was being computed")
+            return
+
+        is_3d = image.ndim == 3
+        depth, height, width = box.size_zyx
+
+        # Too small to be useful - and a (Z, Y, 3)-shaped volume would also be mistaken
+        # for an RGB image by _finalize_loaded_image and collapsed to 2D.
+        if min(height, width) < 5 or (is_3d and depth < 5):
+            size = f"{width} x {height} x {depth}" if is_3d else f"{width} x {height}"
+            QMessageBox.warning(
+                self, "Crop Too Small",
+                f"The largest box inside the sample is only {size} pixels.\n\n"
+                "Check that the right exterior value was chosen, or reduce the safety margin."
+            )
+            self.status_bar.showMessage("Center crop cancelled - box too small")
+            return
+
+        # Ranges are shown inclusive ("120 - 379"), matching the pixel positions shown
+        # when hovering over the image - box.x_stop itself is exclusive, like Python slicing.
+        ranges = [
+            f"X: {box.x_start} - {box.x_stop - 1}   ({width} px)",
+            f"Y: {box.y_start} - {box.y_stop - 1}   ({height} px)",
+        ]
+        if is_3d:
+            ranges.append(f"Z: {box.z_start} - {box.z_stop - 1}   ({depth} slices)")
+            new_size = f"{width} x {height} x {depth} (X x Y x Z)"
+            old_size = f"{image.shape[2]} x {image.shape[1]} x {image.shape[0]}"
+        else:
+            new_size = f"{width} x {height} (X x Y)"
+            old_size = f"{image.shape[1]} x {image.shape[0]}"
+
+        reply = QMessageBox.question(
+            self,
+            "Crop Center",
+            "Largest box around the center that lies inside the sample:\n\n"
+            + "\n".join(ranges) + "\n\n"
+            f"New size: {new_size}, was {old_size}.\n\n"
+            "This replaces the image in the viewer (the file on disk is not changed). Crop now?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            self.status_bar.showMessage("Center crop cancelled")
+            return
+
+        self._apply_center_crop(box)
+
+    def on_crop_center_error(self, error_msg: str):
+        """Handle an error while searching for the center crop box."""
+
+        self.crop_thread.image_data = None  # same reason as in on_crop_center_finished
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximum(0)
+        QMessageBox.critical(self, "Crop Center Error", f"Could not find a center crop:\n{error_msg}")
+        self.status_bar.showMessage(f"Error: {error_msg}")
+
+    def _apply_center_crop(self, box: CropBox):
+        """Replace the current image with the contents of `box` and refresh the whole view."""
+
+        cropped = crop_image(self.current_image_data, box)
+
+        # Shown in the window title, e.g. "sample.tif (center crop)".
+        base_name = os.path.basename(self.current_file_path) if self.current_file_path else "image"
+        source_label = f"{base_name} (center crop)"
+
+        # Reuse the normal "new image loaded" path: it resets the sliders, the display range,
+        # any connected-components result (its labels no longer line up with the cropped
+        # image) and the window title. data_mode stays the same - a cropped 3D volume is
+        # still a 3D volume.
+        self._finalize_loaded_image(
+            cropped, source_label, data_mode=self.data_mode, warn_if_not_binary=False
+        )
+
+        depth, height, width = box.size_zyx
+        size = f"{width} x {height} x {depth}" if cropped.ndim == 3 else f"{width} x {height}"
+        self.status_bar.showMessage(f"Cropped to the center box: {size}")
+
 
     def open_smd_dialog(self):
         """Open the SMD selection dialog (real computation wired up in a later step)."""
@@ -2252,7 +2505,8 @@ class ImageViewer(QMainWindow):
 
     def on_evolution_progress(self, current: int, total: int):
         """Shared progress handler for every evolution-style calculation (Minkowski, SMD,
-        chord length - streaming or not). Each thread's `progress` signal connects here;
+        chord length - streaming or not), and for the slice-by-slice center-crop search.
+        Each thread's `progress` signal connects here;
         self._evolution_description (set right before that thread starts) says which
         calculation is actually running."""
 
