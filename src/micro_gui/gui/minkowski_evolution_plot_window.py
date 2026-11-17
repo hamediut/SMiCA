@@ -122,7 +122,6 @@ class MinkowskiEvolutionPlotWindow(QMainWindow):
             try:
                 save_figure(fig, file_path, n_panels=2)  # raw + specific value side by side
                 remember_save_dir(file_path)
-                QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")
     def export_csv(self):
@@ -146,6 +145,5 @@ class MinkowskiEvolutionPlotWindow(QMainWindow):
                 for idx, result in zip(self.slice_indices, self.results_list):
                     writer.writerow([idx] + [np.round(result[k], 6) for k in keys])
             remember_save_dir(file_path)
-            QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV:\n{str(e)}")

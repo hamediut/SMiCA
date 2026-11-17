@@ -90,7 +90,6 @@ class HistogramPlotWindow(QMainWindow):
             try:
                 save_figure(self.fig, file_path)
                 remember_save_dir(file_path)
-                QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")
 

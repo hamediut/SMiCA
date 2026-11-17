@@ -394,6 +394,5 @@ class ConnectedComponentsResultsDialog(QDialog):
             # as Windows-1252, garbling them into things like "Âµm".
             export_table.to_csv(file_path, index=False, encoding='utf-8-sig')
             remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
-            QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV:\n{str(e)}")

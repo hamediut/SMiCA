@@ -240,7 +240,6 @@ class ChordLengthEvolutionPlotWindow(QMainWindow):
             try:
                 save_figure(fig, file_path)
                 remember_save_dir(file_path)
-                QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")
@@ -279,7 +278,6 @@ class ChordLengthEvolutionPlotWindow(QMainWindow):
                             writer.writerow([self.slice_indices[i], np.round(z_val, 4), np.round(p_val, 6)])
 
             remember_save_dir(file_path)
-            QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV:\n{str(e)}")
 
