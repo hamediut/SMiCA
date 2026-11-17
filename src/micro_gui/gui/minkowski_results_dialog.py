@@ -13,9 +13,10 @@ from .save_dialog_helper import suggested_save_path, remember_save_dir
 class MinkowskiResultsDialog(QDialog):
     """
     Read-only results table for a single 2D/3D Minkowski functionals
-    calculation, with a "Save to CSV" export. Not modal (shown with .show(),
-    not .exec()) so the user can keep it open while comparing against the
-    image or running another calculation.
+    calculation (a 2D image, or a 3D volume loaded from one file or imported
+    as z-slices), with a "Save to CSV..." button that exports the whole table.
+    Not modal (shown with .show(), not .exec()) so the user can keep it open
+    while comparing against the image or running another calculation.
     """
 
     # (result dict key, display label, unit exponent - None means dimensionless)
@@ -92,9 +93,10 @@ class MinkowskiResultsDialog(QDialog):
         button_layout.addStretch()
         button_layout.addWidget(save_button)
         button_layout.addWidget(close_button)
+        layout.addLayout(button_layout)  # without this the buttons were never shown
 
     def _export_csv(self):
-
+        """Save the whole table - every quantity, its value at full precision and its unit."""
 
         file_path, _ = QFileDialog.getSaveFileName(
         self, "Export CSV",
@@ -108,8 +110,10 @@ class MinkowskiResultsDialog(QDialog):
             file_path += '.csv'
 
         try:
-            with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
+            # utf-8-sig: the byte-order mark makes Excel read the units (e.g. µm², µm⁻¹) correctly.
+            # ';' separator, like every other CSV export in the app.
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                writer = csv.writer(csvfile, delimiter=';')
                 writer.writerow(['Quantity', 'Value', 'Unit'])
                 for key, label, exponent in self.rows:
                     writer.writerow([label, self.result[key], self._unit_label(exponent)])
