@@ -7,6 +7,7 @@ and SMDS values for binary microstructure images in 2D and 3D.
 import os
 import math
 import shutil
+import warnings
 import subprocess
 from glob import glob
 import numpy as np
@@ -2119,6 +2120,32 @@ def delta_omega(curve_series: List[np.ndarray],
         omega_values.append(omega / n_r)
 
     return np.array(omega_values)
+
+
+def average_curve_series(curve_series: List[np.ndarray]) -> np.ndarray:
+    """
+    Average one function's curves over a series of slices, point by point in r - e.g. the
+    S2 of every Z-slice of a volume -> one mean S2 curve (the "Average" tab of the slice
+    evolution results).
+
+    Args:
+        curve_series: the [r, value] arrays of one function, one per slice, all with the
+            same r axis (same convention as omega_n()).
+
+    Returns:
+        One [r, mean value] array with the same r axis. NaN values (e.g. the scaled C2 =
+        C2/S2 at an r where S2 = 0 on some slice) are skipped, so the mean at that r is
+        over the slices where the value is defined; it is NaN only if no slice has a value.
+    """
+    if not curve_series:
+        raise ValueError('curve_series must not be empty.')
+
+    curves = np.stack(curve_series)  # shape (n_slices, Nr, 2)
+    with warnings.catch_warnings():
+        # an r with no defined value on any slice -> NaN, which is expected, so no warning
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        mean_values = np.nanmean(curves[:, :, 1], axis=0)
+    return np.column_stack((curves[0, :, 0], mean_values))
 
 
 # ==============================================================

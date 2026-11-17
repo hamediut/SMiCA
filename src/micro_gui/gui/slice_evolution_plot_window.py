@@ -18,19 +18,26 @@ from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget,
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
 from .plot_style import figure_size, r_axis_label, save_figure
+from ..analysis.smds import average_curve_series
 
 class SliceEvolutionPlotWindow(QMainWindow):
 
     """
     One tab per selected polytope function (raw + scaled curves over time/slice, side by
-    side, colored by slice/time index), plus one "Omega" tab (Omega and Delta-Omega, each
-    with one line per function, side by side).
+    side, colored by slice/time index), optionally one "Average" tab (every function's
+    curve averaged over all slices used, raw + scaled side by side), plus one "Omega" tab
+    (Omega and Delta-Omega, each with one line per function, side by side).
     """
 
     def __init__(self, slice_indices, raw_curves_list, scaled_curves_list,
-                 omega_dict, delta_omega_dict, axis_label="slice", parent=None, ndim: int = 2):
-        """ndim: dimensionality of ONE slice/time step the curves were computed on - 2 for a
-        3D volume's slices or a 2D time series, 3 for a 3D time series (sets the r-axis unit)."""
+                 omega_dict, delta_omega_dict, axis_label="slice", parent=None, ndim: int = 2,
+                 show_average: bool = False):
+        """
+        ndim: dimensionality of ONE slice/time step the curves were computed on - 2 for a
+        3D volume's slices or a 2D time series, 3 for a 3D time series (sets the r-axis unit).
+        show_average: add the "Average" tab - meant for the Z-slices of one 3D volume, where
+        the mean over slices estimates the volume's 2D statistics.
+        """
         super().__init__(parent)
         self.ndim = ndim
 
@@ -71,6 +78,20 @@ class SliceEvolutionPlotWindow(QMainWindow):
             widget.setLayout(layout)
             self.tabs.addTab(widget, name.upper())
             self._tab_keys.append(name)
+
+        # one extra tab with every function averaged over all the slices that were computed
+        # (i.e. every Nth slice, as set in the dialog) - all functions together in one plot
+        if show_average:
+            self.average_raw = {name: average_curve_series([curves[name] for curves in raw_curves_list])
+                                for name in self.polytope_names}
+            self.average_scaled = {name: average_curve_series([curves[name] for curves in scaled_curves_list])
+                                   for name in self.polytope_names}
+            average_widget = QWidget()
+            average_layout = QVBoxLayout()
+            average_layout.addWidget(self._build_average_tab())
+            average_widget.setLayout(average_layout)
+            self.tabs.addTab(average_widget, "Average")
+            self._tab_keys.append('average')
 
         # one extra tab for the Omega/Delta-Omega plots, only if at least one was computed
         if self.omega_dict or self.delta_omega_dict:
@@ -128,7 +149,30 @@ class SliceEvolutionPlotWindow(QMainWindow):
 
         self._figures[name] = fig  # remember this figure, keyed by function name, for Save/Export later
         return FigureCanvas(fig)
-    
+
+    def _build_average_tab(self):
+        """Every selected function averaged over all slices used: raw (left) and scaled (right), one line per function."""
+        fig, (ax_raw, ax_scaled) = plt.subplots(1, 2, figsize=figure_size(2), constrained_layout = True)
+        n_used = len(self.slice_indices)
+
+        # same layout as a function tab, but one line per FUNCTION (not per slice), so a
+        # normal legend (like the polytope results window) instead of a slice colorbar
+        for ax, averages, ylabel, kind in ((ax_raw, self.average_raw, "$P_n(r)$", "raw"),
+                                           (ax_scaled, self.average_scaled, "$f_n(r)$", "scaled")):
+            for name in self.polytope_names:
+                curve = averages[name]
+                # P3H/P3V: odd r are always-0 placeholders (see _build_function_tab) - skip them
+                step = 2 if name in ('p3h', 'p3v') else 1
+                ax.plot(curve[::step, 0], curve[::step, 1], label=name.upper())
+            ax.set_title(f"Average of {n_used} {self.axis_label}s ({kind})")
+            ax.set_xlabel(r_axis_label(self.ndim))
+            ax.set_ylabel(ylabel)
+            ax.grid(alpha=0.3)
+            ax.legend()
+
+        self._figures['average'] = fig
+        return FigureCanvas(fig)
+
     def _build_omega_tab(self):
         """Omega (left) and Delta-Omega (right), each with one line per selected function."""
         fig, (ax_omega, ax_delta) = plt.subplots(1, 2, figsize=figure_size(2), constrained_layout = True)
@@ -223,6 +267,16 @@ class SliceEvolutionPlotWindow(QMainWindow):
                         row = [idx]
                         row += [np.round(self.omega_dict[n][i], 6) for n in self.omega_dict]
                         row += [np.round(self.delta_omega_dict[n][i], 6) for n in self.delta_omega_dict]
+                        writer.writerow(row)
+                elif key == 'average':
+                    # one row per r, one column per function's average raw and scaled value
+                    names = self.polytope_names
+                    writer.writerow(['r'] + [f"{n}_raw" for n in names] + [f"{n}_scaled" for n in names])
+                    r_values = self.average_raw[names[0]][:, 0]  # every function shares the same r axis
+                    for i, r in enumerate(r_values):
+                        row = [int(r)]
+                        row += [np.round(self.average_raw[n][i, 1], 4) for n in names]
+                        row += [np.round(self.average_scaled[n][i, 1], 4) for n in names]
                         writer.writerow(row)
                 else:
                     # one row per (slice/time, r) pair, for the currently active function's tab
