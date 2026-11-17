@@ -17,6 +17,7 @@ from matplotlib.colors import Normalize
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
+from .plot_style import figure_size, r_axis_label, save_figure
 
 class SliceEvolutionPlotWindow(QMainWindow):
 
@@ -27,11 +28,14 @@ class SliceEvolutionPlotWindow(QMainWindow):
     """
 
     def __init__(self, slice_indices, raw_curves_list, scaled_curves_list,
-                 omega_dict, delta_omega_dict, axis_label="slice", parent=None):
+                 omega_dict, delta_omega_dict, axis_label="slice", parent=None, ndim: int = 2):
+        """ndim: dimensionality of ONE slice/time step the curves were computed on - 2 for a
+        3D volume's slices or a 2D time series, 3 for a 3D time series (sets the r-axis unit)."""
         super().__init__(parent)
+        self.ndim = ndim
 
         self.setWindowTitle(f"{axis_label.title()} Evolution Results")
-        self.setGeometry(150, 150, 1100, 700)
+        self.setGeometry(150, 150, 1300, 700)  # two panels side by side, with the shared (larger) fonts
 
         # Just store everything the thread sent us - the tab-building methods below read
         # straight from these.
@@ -82,7 +86,7 @@ class SliceEvolutionPlotWindow(QMainWindow):
 
     def _build_function_tab(self, name):
         """One function's tab: raw curves (left) and scaled curves (right), both colored by slice/time index."""
-        fig, (ax_raw, ax_scaled) = plt.subplots(1, 2, figsize=(16, 5), constrained_layout = True)
+        fig, (ax_raw, ax_scaled) = plt.subplots(1, 2, figsize=figure_size(2), constrained_layout = True)
 
         # cmap + norm together turn a slice/time index into a color - this is what makes the
         # colorbar (added below) meaningful: same mapping used for both the lines and the bar
@@ -101,8 +105,8 @@ class SliceEvolutionPlotWindow(QMainWindow):
             else:
                 ax_raw.plot(curve[:, 0], curve[:, 1], color=cmap(norm(idx)), linewidth=1.2, alpha=0.85)
         ax_raw.set_title(f"{name.upper()} (raw)")
-        ax_raw.set_xlabel("r")
-        ax_raw.set_ylabel("Pn(r)")
+        ax_raw.set_xlabel(r_axis_label(self.ndim))
+        ax_raw.set_ylabel("$P_n(r)$")
         ax_raw.grid(alpha=0.3)
 
         # right subplot: same thing, but the scaled fn(r) version
@@ -113,8 +117,8 @@ class SliceEvolutionPlotWindow(QMainWindow):
             else:
                 ax_scaled.plot(curve[:, 0], curve[:, 1], color=cmap(norm(idx)), linewidth=1.2, alpha=0.85)
         ax_scaled.set_title(f"{name.upper()} (scaled)")
-        ax_scaled.set_xlabel("r")
-        ax_scaled.set_ylabel("fn(r)")
+        ax_scaled.set_xlabel(r_axis_label(self.ndim))
+        ax_scaled.set_ylabel("$f_n(r)$")
         ax_scaled.grid(alpha=0.3)
 
         # one shared colorbar for both subplots, showing what each line's color means
@@ -127,7 +131,7 @@ class SliceEvolutionPlotWindow(QMainWindow):
     
     def _build_omega_tab(self):
         """Omega (left) and Delta-Omega (right), each with one line per selected function."""
-        fig, (ax_omega, ax_delta) = plt.subplots(1, 2, figsize=(16, 5), constrained_layout = True)
+        fig, (ax_omega, ax_delta) = plt.subplots(1, 2, figsize=figure_size(2), constrained_layout = True)
 
         # left subplot: Omega vs slice/time index, one line per function (only the functions
         # that actually have Omega computed - some might have been skipped if the "Compute
@@ -135,9 +139,9 @@ class SliceEvolutionPlotWindow(QMainWindow):
         for name in self.polytope_names:
             if name in self.omega_dict:
                 ax_omega.plot(self.slice_indices, self.omega_dict[name], marker='o', markersize=3, label=name.upper())
-        ax_omega.set_title("Omega (vs. reference slice)")
+        ax_omega.set_title(r"$\Omega$ (vs. reference slice)")
         ax_omega.set_xlabel(self.axis_label.title())
-        ax_omega.set_ylabel("Omega")
+        ax_omega.set_ylabel(r"$\Omega$")
         ax_omega.grid(alpha=0.3)
         if self.omega_dict:
             ax_omega.legend()  # only a handful of functions, so a normal legend (not a colorbar) works fine here
@@ -146,9 +150,9 @@ class SliceEvolutionPlotWindow(QMainWindow):
         for name in self.polytope_names:
             if name in self.delta_omega_dict:
                 ax_delta.plot(self.slice_indices, self.delta_omega_dict[name], marker='o', markersize=3, label=name.upper())
-        ax_delta.set_title("Delta-Omega (vs. previous slice)")
+        ax_delta.set_title(r"$\Delta\Omega$ (vs. previous slice)")
         ax_delta.set_xlabel(self.axis_label.title())
-        ax_delta.set_ylabel("Delta-Omega")
+        ax_delta.set_ylabel(r"$\Delta\Omega$")
         ax_delta.grid(alpha=0.3)
         if self.delta_omega_dict:
             ax_delta.legend()
@@ -190,7 +194,7 @@ class SliceEvolutionPlotWindow(QMainWindow):
         )
         if file_path:
             try:
-                fig.savefig(file_path, dpi=300, bbox_inches='tight')
+                save_figure(fig, file_path, n_panels=2)  # every tab here has two panels side by side
                 remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
                 QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:

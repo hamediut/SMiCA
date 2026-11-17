@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt
 
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
+from .plot_style import figure_size, save_figure
 
 class ChordLengthEvolutionPlotWindow(QMainWindow):
     """
@@ -60,7 +61,7 @@ class ChordLengthEvolutionPlotWindow(QMainWindow):
     def _build_mean_tab(self):
         """ell_via_s2 and ell_direct vs. slice/time index - one line each, both methods together."""
 
-        fig, ax = plt.subplots(figsize=(9, 6), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=figure_size(), constrained_layout=True)
 
         # Pull one number out of every slice's result dict - this is exactly the same
         # "list of dicts -> one list per field" extraction _build_omega_tab does with
@@ -119,7 +120,7 @@ class ChordLengthEvolutionPlotWindow(QMainWindow):
 
         # --- the plot: created BEFORE connecting either signal below, so self.ax_dist already
         # exists by the time the default-selection lines trigger the first redraw ---
-        self.fig_dist, self.ax_dist = plt.subplots(figsize=(8, 6), constrained_layout=True)
+        self.fig_dist, self.ax_dist = plt.subplots(figsize=figure_size(), constrained_layout=True)
         self._figures['distribution'] = self.fig_dist
         canvas = FigureCanvas(self.fig_dist)
         right_layout.addWidget(canvas)
@@ -192,8 +193,8 @@ class ChordLengthEvolutionPlotWindow(QMainWindow):
 
         unit = 'pixels' if self.results_list[0]['ndim'] == 2 else 'voxels'
         self.ax_dist.set_title("Chord-Length Distribution (selected slices)")
-        self.ax_dist.set_xlabel(f"Chord Length ({unit})")
-        self.ax_dist.set_ylabel("p(z)")
+        self.ax_dist.set_xlabel(f"Chord length ({unit})")
+        self.ax_dist.set_ylabel("$p(z)$")
         self.ax_dist.set_xlim(0, max_display)
         self.ax_dist.grid(alpha=0.3)
         self.ax_dist.legend()
@@ -237,7 +238,7 @@ class ChordLengthEvolutionPlotWindow(QMainWindow):
         if file_path:
 
             try:
-                fig.savefig(file_path, dpi = 500, bbox_inches='tight')
+                save_figure(fig, file_path)
                 remember_save_dir(file_path)
                 QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
 

@@ -43,9 +43,17 @@ def main():
     runtimePn = args.runtimePn.rstrip('/\\') + '/'
     outputPn = args.outputPn.rstrip('/\\') + '/'
 
+    # The C++ only handles square images, and pads them with one row and one column of
+    # background (period N + 1). calculate_polytopes_python() wraps each axis at its own
+    # length with no padding, so pad the image the same way first - its curves then follow
+    # exactly the C++ convention.
+    if img.shape[0] != img.shape[1]:
+        raise SystemExit(f'The C++ executable needs a square image, got shape {img.shape}.')
+    padded = np.pad(img, ((0, 1), (0, 1)))  # constant 0 = background, appended after the last row/column
+
     # new pure-Python port: computes everything requested in one call
     _, py_scaled = None, None
-    py_raw, py_scaled = calculate_polytopes_python(img, polytopes=tuple(args.polytopes))
+    py_raw, py_scaled = calculate_polytopes_python(padded, polytopes=tuple(args.polytopes))
 
     print()
     print(f"{'polytope':10s} {'status':10s} {'max_abs_diff':>14s} {'max_rel_diff':>14s} {'n_mismatch(>1e-4)':>20s}")
@@ -56,8 +64,9 @@ def main():
             print(f"{name:10s} {'CPP FAILED':10s}  {type(e).__name__}: {e}")
             continue
 
-        mine = py_raw[name][:, 1]
         ref = cpp_raw[:, 1]
+        # C++ Nt = N // 2; the padded image gives (N + 1) // 2, one more point when N is odd
+        mine = py_raw[name][:len(ref), 1]
         diff = np.abs(mine - ref)
         rel = diff / np.maximum(np.abs(ref), 1e-12)
         n_mismatch = int(np.sum(diff > 1e-4))

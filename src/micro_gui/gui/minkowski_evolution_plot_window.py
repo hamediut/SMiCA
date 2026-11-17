@@ -13,6 +13,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
+from .plot_style import figure_size, save_figure
 
 class MinkowskiEvolutionPlotWindow(QMainWindow):
     """
@@ -41,7 +42,7 @@ class MinkowskiEvolutionPlotWindow(QMainWindow):
         super().__init__(parent)
 
         self.setWindowTitle(f"Minkowski Functionals {axis_label.title()} Evolution Results")
-        self.setGeometry(150, 150, 1000, 650)
+        self.setGeometry(150, 150, 1300, 650)  # two panels side by side, with the shared (larger) fonts
 
         self.slice_indices = slice_indices
         self.results_list = results_list
@@ -73,7 +74,7 @@ class MinkowskiEvolutionPlotWindow(QMainWindow):
     def _build_tab(self, raw_key, specific_key, raw_label, specific_label, raw_exponent, specific_exponent):
         """raw_key vs. specific_key, side by side, both vs. slice/time index."""
 
-        fig, (ax_raw, ax_specific) = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+        fig, (ax_raw, ax_specific) = plt.subplots(1, 2, figsize=figure_size(2), constrained_layout=True)
 
         raw_values = [r[raw_key] for r in self.results_list]
         specific_values = [r[specific_key] for r in self.results_list]
@@ -119,7 +120,7 @@ class MinkowskiEvolutionPlotWindow(QMainWindow):
         )
         if file_path:
             try:
-                fig.savefig(file_path, dpi=300, bbox_inches='tight')
+                save_figure(fig, file_path, n_panels=2)  # raw + specific value side by side
                 remember_save_dir(file_path)
                 QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:

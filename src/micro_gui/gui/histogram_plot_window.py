@@ -11,6 +11,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
+from .plot_style import figure_size, save_figure
 
 
 class HistogramPlotWindow(QMainWindow):
@@ -51,7 +52,7 @@ class HistogramPlotWindow(QMainWindow):
         clipped_values = np.clip(values, None, cutoff)
         bin_edges = np.linspace(values.min(), cutoff, num_bins + 1)
 
-        self.fig, ax = plt.subplots(figsize=(6, 5))
+        self.fig, ax = plt.subplots(figsize=figure_size())
         ax.hist(clipped_values, bins=bin_edges)
         if log_y:
             ax.set_yscale('log')
@@ -87,7 +88,7 @@ class HistogramPlotWindow(QMainWindow):
 
         if file_path:
             try:
-                self.fig.savefig(file_path, dpi=300, bbox_inches='tight')
+                save_figure(self.fig, file_path)
                 remember_save_dir(file_path)
                 QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:

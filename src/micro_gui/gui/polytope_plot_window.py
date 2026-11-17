@@ -12,6 +12,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
+from .plot_style import figure_size, r_axis_label, save_figure
 
 
 class PolytopePlotWindow(QMainWindow):
@@ -23,7 +24,8 @@ class PolytopePlotWindow(QMainWindow):
     S2/F2 tab structure.
     """
 
-    def __init__(self, raw_curves: dict, scaled_curves: dict, parent=None):
+    def __init__(self, raw_curves: dict, scaled_curves: dict, parent=None, ndim: int = 2):
+        """ndim: 2 if the curves were computed on a 2D image, 3 for a 3D volume (sets the r-axis unit)."""
         super().__init__(parent)
 
         self.setWindowTitle("Polytope Calculation Results")
@@ -31,6 +33,7 @@ class PolytopePlotWindow(QMainWindow):
 
         self.raw_curves = raw_curves
         self.scaled_curves = scaled_curves
+        self.ndim = ndim
 
         # Create tab widget to show raw and scaled curves separately
         self.tabs = QTabWidget()
@@ -58,7 +61,7 @@ class PolytopePlotWindow(QMainWindow):
     def _create_raw_plot(self):
          """Create the raw Pn(r) plot, one line per selected function."""
 
-         self.fig_raw, self.ax_raw = plt.subplots(figsize=(10, 6))
+         self.fig_raw, self.ax_raw = plt.subplots(figsize=figure_size())
 
          # Why store self.fig_raw/self.ax_raw as instance attributes instead of local variables?
          # save_plots() needs to reach back into whichever figure belongs to the currently active tab
@@ -73,16 +76,14 @@ class PolytopePlotWindow(QMainWindow):
 
             if name in ['p3h', 'p3v']:
                 # For the two triangle functions, plot them every other points as it is zero for every other point, so the line is not continuous and looks weird. This is a temporary fix until we can figure out how to fix the calculation of these two functions.
-                self.ax_raw.plot(curve[::2, 0], curve[::2, 1], linewidth=1.5, label=name.upper())
+                self.ax_raw.plot(curve[::2, 0], curve[::2, 1], label=name.upper())
             else:
-                self.ax_raw.plot(curve[:, 0], curve[:, 1], linewidth=1.5, label=name.upper())
+                self.ax_raw.plot(curve[:, 0], curve[:, 1], label=name.upper())
 
-
-         self.ax_raw.set_title('Polytope Functions (raw)', fontsize=14, fontweight='bold')
-        
-         self.ax_raw.set_xlabel('Distance (r)', fontsize=16)
-         self.ax_raw.set_ylabel('$P_n(r)$', fontsize=16)
-         self.ax_raw.tick_params(axis='both', which='major', labelsize=12)
+         # font sizes and line widths come from the shared style in plot_style.py
+         self.ax_raw.set_title('Polytope Functions (raw)')
+         self.ax_raw.set_xlabel(r_axis_label(self.ndim))
+         self.ax_raw.set_ylabel('$P_n(r)$')
          self.ax_raw.legend()
          self.ax_raw.grid(True, alpha=0.3)
 
@@ -90,20 +91,18 @@ class PolytopePlotWindow(QMainWindow):
 
     def _create_scaled_plot(self):
         """Create the scaled fn(r) plot, one line per selected function."""
-        self.fig_scaled, self.ax_scaled = plt.subplots(figsize=(10, 6))
+        self.fig_scaled, self.ax_scaled = plt.subplots(figsize=figure_size())
 
         for name, curve in self.scaled_curves.items():
             if name in ['p3h', 'p3v']:
                 # For the two triangle functions, plot them every other points as it is zero for every other point, so the line is not continuous and looks weird. This is a temporary fix until we can figure out how to fix the calculation of these two functions.
-                self.ax_scaled.plot(curve[::2, 0], curve[::2, 1], linewidth=1.5, label=name.upper())
+                self.ax_scaled.plot(curve[::2, 0], curve[::2, 1], label=name.upper())
             else:
-                self.ax_scaled.plot(curve[:, 0], curve[:, 1], linewidth=1.5, label=name.upper())
+                self.ax_scaled.plot(curve[:, 0], curve[:, 1], label=name.upper())
 
-        self.ax_scaled.set_title('Polytope Functions (scaled)', fontsize=14, fontweight='bold')
-        
-        self.ax_scaled.set_xlabel('Distance (r)', fontsize=16)
-        self.ax_scaled.set_ylabel('$f_n(r)$', fontsize=16)
-        self.ax_scaled.tick_params(axis='both', which='major', labelsize=12)
+        self.ax_scaled.set_title('Polytope Functions (scaled)')
+        self.ax_scaled.set_xlabel(r_axis_label(self.ndim))
+        self.ax_scaled.set_ylabel('$f_n(r)$')
         self.ax_scaled.legend()
         self.ax_scaled.grid(True, alpha=0.3)
 
@@ -151,7 +150,7 @@ class PolytopePlotWindow(QMainWindow):
 
         if file_path:
             try:
-                current_fig.savefig(file_path, dpi=500, bbox_inches='tight')
+                save_figure(current_fig, file_path)
                 remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
                 QMessageBox.information(self, "Success", f"{plot_name} plot saved to:\n{file_path}")
             except Exception as e:
