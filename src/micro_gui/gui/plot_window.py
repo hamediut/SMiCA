@@ -11,7 +11,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox
 
-from .plot_style import figure_size, r_axis_label, save_figure
+from .plot_style import figure_size, mark_phase_fraction, r_axis_label, save_figure
 
 
 class PlotWindow(QMainWindow):
@@ -52,6 +52,7 @@ class PlotWindow(QMainWindow):
         # font sizes and line widths come from the shared style in plot_style.py
         self.fig, self.ax = plt.subplots(figsize=figure_size())
         self.ax.plot(s2_values)
+        mark_phase_fraction(self.ax, s2_values[0])  # S2(0) is the phase fraction
         self.ax.set_xlabel(r_axis_label(ndim))
         self.ax.set_ylabel('$S_{2}$')
         self.ax.set_title('Two-point Correlation Function ($S_{2}$)')

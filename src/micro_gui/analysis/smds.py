@@ -229,12 +229,21 @@ def cal_fn( polytope:np.ndarray, n:int)->np.ndarray:
     sampled r - a tail above 0 means the structure is still correlated at that distance,
     and small negative values around 0 are normal sampling noise.
 
+    If the phase is absent (phi = 0) or fills the whole image (phi = 1) - e.g. an empty
+    slice at the end of a stack, a small RES/REV crop that falls inside one phase, or an
+    image that was not binarized (every non-zero label counts as the phase, so phi = 1) -
+    there is no two-phase structure and f_n is undefined (0/0): the result is all NaN,
+    returned without a RuntimeWarning.
+
     polytope: raw Pn curve, e.g. S2 or a higher-order polytope function (P3H, P3V, P4, P6).
     n: number of vertices of the polytope - 2 for S2, 3 for P3H/P3V, 4 for P4, 6 for P6."""
-    numerator = polytope - polytope[0] ** n
-    denominator = polytope[0] - polytope[0] ** n
-    fn_r = numerator/ denominator
-    return fn_r
+    phi = polytope[0]
+    denominator = phi - phi ** n
+    if denominator == 0:
+        # phi = 0 or 1: undefined at EVERY r (see above) - all NaN, also at the always-0
+        # odd-r entries of P3H/P3V, which would otherwise come out as -inf
+        return np.full(np.shape(polytope), np.nan)
+    return (polytope - phi ** n) / denominator
 
 def calculate_s2_4d(images: np.ndarray):
     """
@@ -1801,7 +1810,12 @@ def scale_by_initial_value(values: np.ndarray) -> np.ndarray:
     large r for any structure that isn't 100% foreground (an entire segment of length r
     lying inside the phase becomes impossible once r exceeds the longest chord). So f(0) = 1
     and f(r) -> 0, the same visual convention as the other scaled curves.
+
+    If the phase is absent (L(0) = phi = 0), the result is all NaN (0/0), returned without a
+    RuntimeWarning - the same convention as cal_fn().
     """
+    if values[0] == 0:
+        return np.full(np.shape(values), np.nan)
     return values / values[0]
 
 

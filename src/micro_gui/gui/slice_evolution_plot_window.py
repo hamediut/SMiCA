@@ -17,7 +17,7 @@ from matplotlib.colors import Normalize
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QTabWidget, QWidget, QVBoxLayout
 
 from .save_dialog_helper import suggested_save_path, remember_save_dir
-from .plot_style import figure_size, r_axis_label, save_figure
+from .plot_style import curve_style, figure_size, r_axis_label, save_figure
 from ..analysis.smds import average_curve_series
 
 class SliceEvolutionPlotWindow(QMainWindow):
@@ -163,7 +163,8 @@ class SliceEvolutionPlotWindow(QMainWindow):
                 curve = averages[name]
                 # P3H/P3V: odd r are always-0 placeholders (see _build_function_tab) - skip them
                 step = 2 if name in ('p3h', 'p3v') else 1
-                ax.plot(curve[::step, 0], curve[::step, 1], label=name.upper())
+                # curve_style: S2 wider and underneath, so it stays visible when C2 = S2
+                ax.plot(curve[::step, 0], curve[::step, 1], label=name.upper(), **curve_style(name))
             ax.set_title(f"Average of {n_used} {self.axis_label}s ({kind})")
             ax.set_xlabel(r_axis_label(self.ndim))
             ax.set_ylabel(ylabel)
