@@ -3,7 +3,7 @@
 A GUI application for analyzing microstructure images using correlation functions, Minkowski functionals, and other statistical/morphological descriptors, specifically designed for materials science and microstructure characterization.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/python-3.10-blue)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 
 ## Features
@@ -15,6 +15,15 @@ A GUI application for analyzing microstructure images using correlation function
 - **Time series / 4D datasets from a folder**: each time step can be a single 2D slice or a full 3D volume, sorted by a number extracted from the filenames (with a range/select picker).
 - **Low-memory streaming mode**: for datasets with many large 3D volumes (e.g. dozens of XCT volumes) that don't fit in RAM as one 4D array, only the file paths are kept and volumes are loaded, processed, and discarded one at a time - peak memory stays at "one volume's worth" regardless of how many time steps there are.
 - **Interactive viewer**: slice/time sliders for 3D and 4D data, real-time pixel value on hover, coordinate tracking.
+- **Long file paths**: images in deeply nested folders (paths over Windows' 260-character limit) load normally.
+
+### Image Processing & Saving
+
+- **Binarize**: pick the pixel value of the phase of interest; it becomes the foreground (1) and everything else the background (0).
+- **Crop Center**: crops the largest box around the center of a cylindrical sample that lies completely inside the sample, removing the air around it. You choose the exterior (air) value, a cube or a square column, and an optional safety margin. Pores inside the sample with the same value as the air are kept, and for 3D volumes the box fits every slice, even when the sample shifts between slices or isn't perfectly round. The settings dialog doesn't block the viewer, so pixel values can still be checked by hovering over the image.
+- **Save As**: save the image currently in the viewer, e.g. after binarizing or cropping:
+  - *Image Sequence*: one TIFF file per slice in a chosen folder. Slices keep their original file names (or `<name>_0000.tif`, ... for a volume opened from one multi-page TIFF), so each slice keeps its original slice number, also after cropping.
+  - *Single Image*: one TIFF file - a multi-page TIFF for a 3D volume.
 
 ### Statistical Microstructure Descriptors (SMDs)
 
@@ -22,7 +31,8 @@ A GUI application for analyzing microstructure images using correlation function
 - Two-point cluster function (C2), in 2D and 3D.
 - Additional 2D polytope functions: P3H, P3V (triangles), P4 (square), P6 (hexagon).
 - Lineal-path function (L), in 2D and 3D.
-- **Evolution across a stack**: compute any of the above independently on every slice/time-step of a 3D or 4D dataset, with Omega and Delta-Omega evolution metrics relative to a reference slice.
+- S2 follows the standard periodic convention (Torquato 2002) everywhere it is used - SMDs, REV/RES and chord length - and works on non-square images.
+- **Evolution across a stack**: compute any of the above independently on every slice/time-step of a 3D or 4D dataset, with Omega and Delta-Omega evolution metrics relative to a reference slice. For the Z-slices of a 3D volume, an optional **Average** tab shows every function averaged over all slices.
 - JIT-compiled with Numba for performance.
 
 ### Chord Length
@@ -41,10 +51,19 @@ A GUI application for analyzing microstructure images using correlation function
 - Computed via [QuantImPy](https://github.com/boeleman/quantimpy), with the library's internal Mecke-normalization constants corrected back out so the reported values are the true physical/topological quantities (matching the classical integral-geometry definitions), not QuantImPy's raw normalized output.
 - Single-image results in a table with CSV export, or evolution across a 2D/3D time series or 4D dataset (same low-memory streaming support as above).
 
+### Connected Components & Shape Measurements
+
+- **Connected components** of the foreground phase in 2D (4- or 8-connectivity) and 3D (6-, 18- or 26-connectivity), shown in the viewer with one color per component (toggle with *Show Connected Components Colors*).
+- **Measurements** per component, in physical units (pixel/voxel size and unit), with a minimum-size filter:
+  - 2D: size, equivalent diameter, aspect ratio, perimeter, specific perimeter, circularity.
+  - 3D: size, equivalent diameter, aspect ratio, surface area, specific surface area, sphericity, elongation, flatness, inclination and azimuth (orientation).
+- **Results table**: sort by any column, plot a histogram of any column (maximum-value percentile, number of bins, optional log-scale y-axis), and delete selected components with a right-click. Clicking OK keeps the remaining components as the new working image, so the other analyses run on what's left. Export the table as CSV.
+
 
 ### Data Export & Visualization
 
 - Matplotlib-based plotting for every result type, with tabs for multi-function/multi-tab results.
+- Every saved figure has the same paper-ready style - the same fonts, line widths and size per panel, at 500 dpi - so figures from different analyses match in a publication.
 - Save plots as PNG, JPEG, or PDF; export underlying data as CSV.
 
 
@@ -141,14 +160,16 @@ This is what you'd use while actively editing the source in an editor like VS Co
 ### Basic Workflow
 
 1. **Load data** (`File` menu):
-   - `Open Single 2D/3D Image` (`Ctrl+O`) - one binary TIF/TIFF file.
+   - `Import Single 2D/3D Image` (`Ctrl+O`) - one TIF/TIFF file (a multi-page TIFF is a 3D volume).
    - `Import Single 3D Volume (from Z-Slice Files)` - assemble one volume from a folder of 2D slices.
    - `Import Time Series/4D Dataset (2D or 3D per step)` - a folder of multiple time steps; check "Low-memory mode" if you have many large 3D volumes that won't fit in RAM at once.
    - For 3D/4D data, use the slice/time sliders to navigate.
 
    <img src="docs/Screenshot_MainWindow.png" width="700" alt="Main window with an image loaded">
 
-2. **Binarize if needed** (`Process > Binarize`): pick which pixel value is the foreground; everything else becomes background.
+2. **Prepare the image** (`Process` menu):
+   - `Binarize` - pick which pixel value is the foreground; everything else becomes background. Needed for multi-label (segmented) images before running the analyses.
+   - `Cropping > Crop Center...` - for a cylindrical sample surrounded by air, crop the largest box that lies inside the sample. Shows the box it found and asks before cropping.
 
 3. **Run an analysis**:
    - `SMDs > Calculate SMDs` (or `Calculate Slice Evolution` for a stack) - select which functions to compute.
@@ -161,11 +182,15 @@ This is what you'd use while actively editing the source in an editor like VS Co
 
      <img src="docs/Screenshot_MinkowskiFunctionals.png" width="700" alt="Minkowski Functionals evolution results - Euler characteristic tab, raw and specific values across a 3D time series">
 
+   - `Image Analysis > Calculate Connected Components...`, then `Image Analysis > Calculate Measurements...` - label the components of the foreground and measure their shape; the results table opens afterwards.
+
    Example evolution result (Omega/Delta-Omega across a time series):
 
    <img src="docs/TimeSeries-EvolutionResults.png" width="700" alt="Omega and Delta-Omega evolution plot across a time series">
 
-4. **Export Results**: every plot window has `File > Save Plot as Image` and `File > Export Data as CSV`; the Minkowski results table has its own `Save to CSV` button.
+4. **Export results**: every plot window has `File > Save Plot as Image` and `File > Export Data as CSV`; the Minkowski and connected-components results tables have their own `Save to CSV...` button.
+
+5. **Save the processed image** (`File > Save As`): `Image Sequence` (one TIFF per slice, keeping the original slice names) or `Single Image` (one TIFF, multi-page for a 3D volume).
 
 
 ## Project Structure
@@ -176,8 +201,9 @@ SMiCA/
 │   └── micro_gui/           # Main package
 │       ├── main.py          # Entry point
 │       ├── gui/             # Main window, menus, and one settings-dialog/plot-window pair per analysis
-│       ├── analysis/        # Analysis algorithms, no Qt dependency (SMDs, chord length, REV/RES, Minkowski functionals)
-│       └── utils/           # Image loading/info utilities
+│       ├── analysis/        # Analysis algorithms, no Qt dependency (SMDs, chord length, REV/RES, Minkowski functionals, connected components)
+│       ├── processing/      # Image processing, no Qt dependency (cropping)
+│       └── utils/           # Image loading/saving utilities
 ├── tests/                   # Unit tests
 ├── notebooks/               # Validation/comparison notebooks
 ├── cpp_poly/                # Reference C++ implementation used to validate the Python/Numba polytope functions
@@ -267,6 +293,15 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Version History
 
+- **v0.3.0** (2026-11) - Connected components, cropping and saving images
+  - Connected components analysis (2D/3D) with shape measurements, a color view, and a results table that can be sorted, plotted as histograms, and used to delete components
+  - `Process > Cropping > Crop Center`: largest box that lies inside a cylindrical sample
+  - `File > Save As`: save the current image as an image sequence or as a single (multi-page) TIFF
+  - SMDs: periodic S2 convention everywhere (SMDs, REV/RES, chord length), support for non-square images, and an Average tab in the slice evolution of a 3D volume
+  - Paper-ready plot style shared by every saved figure
+  - Fixes: Minkowski `Save to CSV` button, long file paths on Windows, reading 2D images, connected components bugs
+  - No more "Success" pop-ups after saving plots or exporting CSV files
+  - `requirements-dev.txt` for development setups; Python 3.10 documented as the supported version
 - **v0.2.0** (2026-07) - Major feature expansion
   - Minkowski functionals (2D/3D, single image and evolution across a stack/4D dataset)
   - Chord length calculation (single image and evolution)
