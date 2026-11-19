@@ -63,8 +63,13 @@ development, or on macOS/Linux, which the installer doesn't support.
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.10 (tested; 3.9 should also work). Newer versions don't work yet: the
+  Minkowski dependency QuantImPy only ships prebuilt packages up to Python 3.10.
 - Conda (Anaconda or Miniconda) recommended
+
+`requirements.txt` lists what the app needs to run. For development (running the tests
+and notebooks, or building the Windows installer), install `requirements-dev.txt`
+instead - it includes `requirements.txt` plus pytest, ipykernel, joblib and PyInstaller.
 
 ### Option 1: Using Conda (Recommended)
 
@@ -77,7 +82,7 @@ cd SMiCA
 conda create -n gui_micro python=3.10
 conda activate gui_micro
 
-# Install dependencies
+# Install dependencies (requirements-dev.txt instead for development)
 pip install -r requirements.txt
 
 # Install the package in development mode
@@ -91,7 +96,7 @@ pip install -e .
 git clone https://github.com/hamediut/SMiCA.git
 cd SMiCA
 
-# Create virtual environment
+# Create virtual environment (with Python 3.10 - see Prerequisites)
 python -m venv venv
 
 # Activate virtual environment
@@ -181,7 +186,8 @@ SMiCA/
 │   └── redist/                # VC++ Redistributable goes here (not committed - see its README)
 ├── ImageViewer.py           # Entry-point script
 ├── SMiCA.spec               # PyInstaller build config
-├── requirements.txt
+├── requirements.txt         # Packages the app needs to run
+├── requirements-dev.txt     # requirements.txt + tools for tests, notebooks and building the installer
 ├── setup.py
 ├── LICENSE                  # MIT License
 └── README.md
@@ -193,11 +199,10 @@ This packages the app into `SMiCA_Setup.exe` - a standalone Windows installer th
 needs no Python or dependencies on the target machine (see "Option 0" under
 Installation above for the end-user side of this).
 
-1. From the `gui_micro` conda environment (or any environment with all of
-   `requirements.txt` installed) at the repo root:
+1. From the `gui_micro` conda environment (or any environment with
+   `requirements-dev.txt` installed, which includes PyInstaller) at the repo root:
    ```bash
-   pip install pyinstaller
-   pyinstaller --noconfirm SMiCA.spec
+   pyinstaller --noconfirm --clean SMiCA.spec
    ```
    This produces `dist/SMiCA/`, a folder containing `SMiCA.exe` and every dependency
    it needs.

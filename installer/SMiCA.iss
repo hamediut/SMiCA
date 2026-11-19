@@ -7,7 +7,7 @@
 ; guarantees the target machine has a working copy instead).
 
 #define MyAppName "SMiCA"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "Hamed Amiri"
 #define MyAppExeName "SMiCA.exe"
 

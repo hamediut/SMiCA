@@ -15,7 +15,7 @@ with open(os.path.join(this_directory, 'requirements.txt'), encoding='utf-8') as
 
 setup(
     name='micro-gui',
-    version='0.2.0',
+    version='0.3.0',
     author='Hamed Amiri',
     author_email='amiiri.hamed@gmail.com',
     description='GUI Application for Statistical Microstructure Characterisation and Analysis',
@@ -31,13 +31,13 @@ setup(
         'Topic :: Scientific/Engineering :: Physics',
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
-        'Programming Language :: Python :: 3.11',
         'Operating System :: OS Independent',
     ],
-    python_requires='>=3.8',
+    # 3.9 is the oldest Python the required tifffile supports; quantimpy only ships
+    # prebuilt packages up to 3.10 (see the note at the top of requirements.txt).
+    python_requires='>=3.9,<3.11',
     install_requires=requirements,
     entry_points={
         'console_scripts': [

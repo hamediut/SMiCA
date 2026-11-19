@@ -1,3 +1,13 @@
+# Packages SMiCA needs to RUN. Installed by `pip install -r requirements.txt`, and also by
+# `pip install -e .` (setup.py reads this file for install_requires).
+#
+# Python version: use Python 3.10 (tested; 3.9 should also work). quantimpy (below) only
+# ships prebuilt packages up to Python 3.10, and numpy is capped below 2.0 - on newer
+# Pythons pip would try to compile quantimpy from source, which usually fails on Windows.
+#
+# For development (tests, notebooks, helper scripts, building the Windows installer)
+# install requirements-dev.txt instead - it includes this file.
+
 # Core GUI Framework
 PySide6>=6.5.0
 
@@ -8,28 +18,23 @@ PySide6>=6.5.0
 numpy>=1.24.0,<2.0
 numba>=0.57.0
 pandas>=2.0.0
+# tqdm is only used by the C++ reference wrapper in analysis/smds.py, but smds.py imports
+# it at the top, so the app can't start without it.
 tqdm>=4.65.0
 
 # Image Processing
 Pillow>=10.0.0
 tifffile>=2023.7.10
 scikit-image>=0.21.0
-scipy>=1.10.0  # already installed with scikit-image; listed because cropping imports scipy.ndimage directly
+# scipy also comes with scikit-image; listed because the cropping code imports scipy.ndimage directly
+scipy>=1.10.0
 
 # Visualization
 matplotlib>=3.7.0
 
 # Minkowski functionals (2D/3D microstructure characterisation)
-# NOTE: GPLv3+ licensed (this project is MIT) — kept as an installed
+# NOTE: GPLv3+ licensed (this project is MIT) - kept as an installed
 # dependency, not vendored source, to avoid license conflicts.
 # Cite: Boelens & Tchelepi, "QuantImPy: Minkowski functionals and functions
 # with Python", SoftwareX 16, 2021, 100823. doi:10.1016/j.softx.2021.100823
 quantimpy>=0.4.6
-
-# Development Dependencies (optional)
-# Uncomment for development
-# pytest>=7.4.0
-# pytest-qt>=4.2.0
-# black>=23.0.0
-# flake8>=6.0.0
-# mypy>=1.4.0
