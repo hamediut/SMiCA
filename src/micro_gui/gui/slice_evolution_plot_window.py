@@ -241,7 +241,6 @@ class SliceEvolutionPlotWindow(QMainWindow):
             try:
                 save_figure(fig, file_path, n_panels=2)  # every tab here has two panels side by side
                 remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
-                QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")
 
@@ -288,7 +287,6 @@ class SliceEvolutionPlotWindow(QMainWindow):
                         for i, r in enumerate(raw_curve[:, 0]):
                             writer.writerow([idx, int(r), np.round(raw_curve[i, 1], 4), np.round(scaled_curve[i, 1], 4)])
             remember_save_dir(file_path)  # so the next Save dialog opens in this same folder
-            QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV:\n{str(e)}")
 

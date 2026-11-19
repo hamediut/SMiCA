@@ -118,7 +118,6 @@ class MinkowskiResultsDialog(QDialog):
                 for key, label, exponent in self.rows:
                     writer.writerow([label, self.result[key], self._unit_label(exponent)])
             remember_save_dir(file_path)
-            QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV:\n{str(e)}")
 

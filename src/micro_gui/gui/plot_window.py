@@ -97,7 +97,6 @@ class PlotWindow(QMainWindow):
         if file_path: # If user didn't cancel and selected a file path
             try:
                 save_figure(self.fig, file_path)
-                QMessageBox.information(self, "Success", f"Plot saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save plot:\n{str(e)}")
 
@@ -122,6 +121,5 @@ class PlotWindow(QMainWindow):
                     for i, value in enumerate(self.s2_values):
                         writer.writerow([i, np.round(value, decimals=4)])
 
-                QMessageBox.information(self, "Success", f"Data exported to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export CSV:\n{str(e)}")
